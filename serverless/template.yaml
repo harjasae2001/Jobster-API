@@ -1,0 +1,480 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Jobster Serverless — AWS SAM Template
+#
+# Resources provisioned:
+#   - DynamoDB Table (JobsterTable)            single-table design, PAY_PER_REQUEST
+#   - 5 Lambda Functions                       Node.js 20.x, 128 MB
+#   - API Gateway REST API                     with CORS + request validation
+#   - S3 Bucket (Frontend)                     static site hosting
+#   - CloudFront Distribution                  CDN + HTTPS for the S3 frontend
+#   - IAM Roles (per Lambda, least-privilege)  scoped DynamoDB permissions
+#
+# Region: ap-south-1 (Mumbai) — set in samconfig.toml
+# ─────────────────────────────────────────────────────────────────────────────
+
+Description: >
+  Jobster API Serverless Stack — Lambda + DynamoDB + API Gateway + S3 + CloudFront (ap-south-1)
+
+# ── Parameters ────────────────────────────────────────────────────────────────
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+    Description: Deployment environment
+
+  JwtSecret:
+    Type: String
+    NoEcho: true  # Masked in CloudFormation console and CLI output
+    Description: JWT signing secret (keep this long and random — min 32 chars)
+    MinLength: 16
+
+  JwtLifetime:
+    Type: String
+    Default: 1d
+    Description: JWT expiry (e.g. 1d, 7d, 1h)
+
+  FrontendBucketSuffix:
+    Type: String
+    Default: a7f3k9
+    Description: >
+      Random suffix for the globally-unique S3 bucket name.
+      Full name will be: jobster-frontend-<suffix>
+
+# ── Globals — applied to all SAM Lambda functions ─────────────────────────────
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Architectures:
+      - arm64          # Graviton2 — ~20% cheaper than x86, same performance for I/O-bound code
+    MemorySize: 128    # Minimum needed for these handlers; keeps cost near-zero
+    Timeout: 10        # Generous timeout; DynamoDB calls are typically < 100ms
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref JobsterTable
+        JWT_SECRET: !Ref JwtSecret
+        JWT_LIFETIME: !Ref JwtLifetime
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'  # Reuse HTTP keep-alive connections to DDB
+    Layers:
+      - !Ref DependenciesLayer  # Shared node_modules layer to keep function ZIPs small
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+Resources:
+
+  # ── LAYER: Shared node_modules ───────────────────────────────────────────────
+  # Packages (bcryptjs, jsonwebtoken, uuid, aws-sdk, http-status-codes) are
+  # bundled once into a Lambda Layer. This means each function ZIP is < 10 KB
+  # (just the handler code), which dramatically speeds up cold starts.
+  DependenciesLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub 'jobster-deps-${Environment}'
+      Description: Shared Node.js dependencies for Jobster Lambda functions
+      ContentUri: ./
+      CompatibleRuntimes:
+        - nodejs20.x
+      RetentionPolicy: Delete  # Remove old layer versions on update
+    Metadata:
+      BuildMethod: nodejs20.x
+      BuildProperties:
+        EntryPoints:
+          - package.json
+
+  # ── DYNAMODB TABLE ────────────────────────────────────────────────────────────
+  # Single-table design:
+  #   - Users:  PK=USER#<email>     SK=PROFILE  (login lookup)
+  #             PK=USERID#<userId>  SK=PROFILE  (auth middleware lookup)
+  #   - Jobs:   PK=USER#<userId>    SK=JOB#<jobId>
+  #
+  # INTERVIEW NOTE — PAY_PER_REQUEST vs. PROVISIONED:
+  #   PAY_PER_REQUEST (on-demand) mode has no minimum cost and scales automatically.
+  #   For a portfolio project with bursty/intermittent traffic, on-demand is ideal.
+  #   Provisioned capacity would be cheaper at sustained high throughput (>1000 RCU/WCU)
+  #   but requires capacity planning and auto-scaling config.
+  JobsterTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'JobsterTable-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true  # Free PITR window; good practice
+      SSESpecification:
+        SSEEnabled: true  # Server-side encryption at rest (AES-256, KMS-managed)
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        # GSI1: email → user lookup (used by login to find user by email)
+        # NOTE: In our implementation login does a direct GetItem on USER#<email>
+        # so GSI1 is included here for reference/flexibility but not actively used.
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: Jobster
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── IAM ROLE BASE: Auth Functions ────────────────────────────────────────────
+  AuthFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'JobsterAuthLambdaRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Basic Lambda execution: CloudWatch Logs write access
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAuthAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # INTERVIEW NOTE — Least Privilege:
+              # Auth functions need PutItem (register), GetItem (login by email/userId).
+              # They do NOT need DeleteItem, UpdateItem, or Scan — so we don't grant them.
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem   # register: create user records
+                  - dynamodb:GetItem   # login: fetch user by email-keyed PK
+                Resource:
+                  - !GetAtt JobsterTable.Arn
+                  - !Sub '${JobsterTable.Arn}/index/GSI1'
+
+  # ── IAM ROLE BASE: Jobs Functions ────────────────────────────────────────────
+  JobsFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'JobsterJobsLambdaRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBJobsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Jobs functions do NOT need GSI access — they query by user PK directly
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem   # createJob
+                  - dynamodb:GetItem   # getJob
+                  - dynamodb:Query     # getAllJobs (by user PK + SK prefix)
+                Resource:
+                  - !GetAtt JobsterTable.Arn
+                  # No GSI ARN here — jobs functions never touch GSI1
+
+  # ── API GATEWAY ───────────────────────────────────────────────────────────────
+  JobsterApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub 'jobster-api-${Environment}'
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'GET,POST,PATCH,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+      # Request validation (rejects missing body/params at gateway level — before Lambda)
+      Models:
+        RegisterRequest:
+          type: object
+          required:
+            - name
+            - email
+            - password
+          properties:
+            name:
+              type: string
+            email:
+              type: string
+            password:
+              type: string
+        LoginRequest:
+          type: object
+          required:
+            - email
+            - password
+          properties:
+            email:
+              type: string
+            password:
+              type: string
+      Tags:
+        Project: Jobster
+        Environment: !Ref Environment
+
+  # ── LAMBDA: Auth Register ──────────────────────────────────────────────────
+  RegisterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'jobster-auth-register-${Environment}'
+      CodeUri: src/handlers/
+      Handler: auth-register.handler
+      Role: !GetAtt AuthFunctionRole.Arn
+      Description: 'POST /api/v1/auth/register — create a new Jobster user account'
+      Events:
+        RegisterApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref JobsterApi
+            Path: /api/v1/auth/register
+            Method: POST
+
+  # ── LAMBDA: Auth Login ──────────────────────────────────────────────────────
+  LoginFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'jobster-auth-login-${Environment}'
+      CodeUri: src/handlers/
+      Handler: auth-login.handler
+      Role: !GetAtt AuthFunctionRole.Arn
+      Description: 'POST /api/v1/auth/login — authenticate and receive JWT'
+      Events:
+        LoginApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref JobsterApi
+            Path: /api/v1/auth/login
+            Method: POST
+
+  # ── LAMBDA: Get All Jobs ────────────────────────────────────────────────────
+  GetAllJobsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'jobster-jobs-get-all-${Environment}'
+      CodeUri: src/handlers/
+      Handler: jobs-get-all.handler
+      Role: !GetAtt JobsFunctionRole.Arn
+      Description: 'GET /api/v1/jobs — search and list jobs with filters, sort, pagination'
+      Events:
+        GetAllJobsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref JobsterApi
+            Path: /api/v1/jobs
+            Method: GET
+
+  # ── LAMBDA: Create Job ──────────────────────────────────────────────────────
+  CreateJobFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'jobster-jobs-create-${Environment}'
+      CodeUri: src/handlers/
+      Handler: jobs-create.handler
+      Role: !GetAtt JobsFunctionRole.Arn
+      Description: 'POST /api/v1/jobs — create a new job listing'
+      Events:
+        CreateJobApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref JobsterApi
+            Path: /api/v1/jobs
+            Method: POST
+
+  # ── LAMBDA: Get Single Job ──────────────────────────────────────────────────
+  GetJobFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'jobster-jobs-get-one-${Environment}'
+      CodeUri: src/handlers/
+      Handler: jobs-get-one.handler
+      Role: !GetAtt JobsFunctionRole.Arn
+      Description: 'GET /api/v1/jobs/{id} — fetch a single job by ID (ownership-scoped)'
+      Events:
+        GetJobApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref JobsterApi
+            Path: /api/v1/jobs/{id}
+            Method: GET
+
+  # ── S3 BUCKET: Frontend Static Site ─────────────────────────────────────────
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'jobster-frontend-${FrontendBucketSuffix}'
+      # Block all public access — CloudFront accesses S3 via OAC (Origin Access Control)
+      # Users cannot bypass CloudFront to hit S3 directly
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Project
+          Value: Jobster
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── CLOUDFRONT: Origin Access Control ────────────────────────────────────────
+  # OAC is the modern replacement for Origin Access Identity (OAI).
+  # It signs S3 requests with SigV4 so only CloudFront can read the bucket.
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub 'jobster-oac-${Environment}'
+        Description: OAC for Jobster frontend S3 bucket
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # ── S3 BUCKET POLICY: Allow CloudFront OAC ───────────────────────────────────
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipal
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+
+  # ── CLOUDFRONT DISTRIBUTION ───────────────────────────────────────────────────
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub 'Jobster frontend CDN (${Environment})'
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2and3  # Enable HTTP/3 (QUIC) for best performance
+        IPV6Enabled: true
+        PriceClass: PriceClass_200  # Americas + Europe + Asia (includes ap-south-1 edge)
+        # Origins
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt CloudFrontOAC.Id
+            S3OriginConfig: {}  # Required empty object when using OAC
+          - Id: ApiOrigin
+            DomainName: !Sub '${JobsterApi}.execute-api.ap-south-1.amazonaws.com'
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
+        # Cache Behaviours
+        CacheBehaviors:
+          # API routes — no caching (always forward to API Gateway)
+          - PathPattern: /api/*
+            TargetOriginId: ApiOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
+            CachedMethods: [GET, HEAD]
+            ForwardedValues:
+              QueryString: true
+              Headers:
+                - Authorization
+                - Content-Type
+            DefaultTTL: 0
+            MinTTL: 0
+            MaxTTL: 0
+        # Default behaviour — serve React SPA from S3
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          DefaultTTL: 86400        # 1 day cache for static assets
+          MinTTL: 0
+          MaxTTL: 31536000         # 1 year max
+          Compress: true           # Gzip/Brotli compression at edge
+        # SPA routing — return index.html for 403/404 so React Router works
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+      Tags:
+        - Key: Project
+          Value: Jobster
+        - Key: Environment
+          Value: !Ref Environment
+
+# ── Outputs ───────────────────────────────────────────────────────────────────
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway base URL
+    Value: !Sub 'https://${JobsterApi}.execute-api.ap-south-1.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiEndpoint'
+
+  FrontendURL:
+    Description: CloudFront distribution URL (HTTPS frontend)
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-FrontendURL'
+
+  FrontendBucketName:
+    Description: S3 bucket name (needed by deploy-frontend.ps1)
+    Value: !Ref FrontendBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-FrontendBucket'
+
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID (for cache invalidation)
+    Value: !Ref CloudFrontDistribution
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFrontDistributionId'
+
+  DynamoDBTableName:
+    Description: DynamoDB table name
+    Value: !Ref JobsterTable
+    Export:
+      Name: !Sub '${AWS::StackName}-TableName'
+
+  DynamoDBTableArn:
+    Description: DynamoDB table ARN (for cross-stack references)
+    Value: !GetAtt JobsterTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TableArn'

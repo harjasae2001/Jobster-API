@@ -1,0 +1,1 @@
+{ "body": null, "headers": { "Authorization": "Bearer REPLACE_WITH_JWT_TOKEN" }, "httpMethod": "GET", "path": "/api/v1/jobs/REPLACE_WITH_JOB_ID", "pathParameters": { "id": "REPLACE_WITH_JOB_ID" } }

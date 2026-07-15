@@ -1,0 +1,35 @@
+{
+  "name": "jobster-serverless",
+  "version": "1.0.0",
+  "description": "Jobster API — Serverless AWS stack (Lambda + DynamoDB + API Gateway + S3 + CloudFront)",
+  "main": "index.js",
+  "scripts": {
+    "build": "sam build",
+    "deploy": "sam deploy",
+    "deploy:guided": "sam deploy --guided",
+    "local:register": "sam local invoke RegisterFunction -e events/auth-register.json",
+    "local:login": "sam local invoke LoginFunction -e events/auth-login.json",
+    "local:create-job": "sam local invoke CreateJobFunction -e events/jobs-create.json",
+    "local:get-jobs": "sam local invoke GetAllJobsFunction -e events/jobs-get-all.json",
+    "local:get-job": "sam local invoke GetJobFunction -e events/jobs-get-one.json",
+    "local:api": "sam local start-api",
+    "seed": "node scripts/seed.js",
+    "validate": "sam validate"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.600.0",
+    "@aws-sdk/lib-dynamodb": "^3.600.0",
+    "bcryptjs": "^2.4.3",
+    "http-status-codes": "^2.3.0",
+    "jsonwebtoken": "^9.0.2",
+    "uuid": "^11.1.1"
+  },
+  "devDependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "author": "",
+  "license": "ISC"
+}
