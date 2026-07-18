@@ -6,7 +6,7 @@ import JobInfo from './JobInfo';
 import moment from 'moment';
 import { deleteJob, setEditJob } from '../features/job/jobSlice';
 const Job = ({
-  _id,
+  jobId,
   position,
   company,
   jobLocation,
@@ -42,7 +42,7 @@ const Job = ({
               onClick={() =>
                 dispatch(
                   setEditJob({
-                    editJobId: _id,
+                    editJobId: jobId,
                     position,
                     company,
                     jobLocation,
@@ -57,7 +57,7 @@ const Job = ({
             <button
               type='button'
               className='btn delete-btn'
-              onClick={() => dispatch(deleteJob(_id))}
+              onClick={() => dispatch(deleteJob(jobId))}
             >
               delete
             </button>

@@ -34,7 +34,7 @@ const docClient = DynamoDBDocumentClient.from(rawClient, {
   marshallOptions: { removeUndefinedValues: true },
 });
 
-const TABLE_NAME = process.env.TABLE_NAME || 'JobsterTable';
+const TABLE_NAME = process.env.TABLE_NAME || 'JobsterTable-Production';
 
 // Test user — same ID as hardcoded in Express middleware/authentication.js
 // so the existing mock data (which uses createdBy: '62f801d0510a7c1ed2312d52') still works

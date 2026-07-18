@@ -3,7 +3,7 @@ import { clearStore } from '../features/user/userSlice'
 import { getUserFromLocalStorage } from './localStorage'
 
 const customFetch = axios.create({
-  baseURL: '/api/v1',
+  baseURL: process.env.REACT_APP_API_URL,
 })
 
 customFetch.interceptors.request.use((config) => {

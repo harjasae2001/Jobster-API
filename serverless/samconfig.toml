@@ -5,6 +5,7 @@ version = 0.1
 
 [default.global.parameters]
 stack_name = "jobster-serverless"
+region = "ap-south-1"
 
 [default.build.parameters]
 cached       = true
@@ -14,8 +15,9 @@ parallel     = true
 capabilities          = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
 confirm_changeset     = true
 resolve_s3            = true
-region                = "ap-south-1"
-parameter_overrides   = "Environment=production"
+parameter_overrides   = "Environment=\"production\" JwtLifetime=\"1d\" FrontendBucketSuffix=\"a7f3k9\""
+s3_prefix = "jobster-serverless"
+image_repositories = []
 
 [default.local_start_api.parameters]
 warm_containers = "EAGER"

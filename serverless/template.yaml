@@ -47,7 +47,7 @@ Parameters:
 # ── Globals — applied to all SAM Lambda functions ─────────────────────────────
 Globals:
   Function:
-    Runtime: nodejs20.x
+    Runtime: nodejs24.x
     Architectures:
       - arm64          # Graviton2 — ~20% cheaper than x86, same performance for I/O-bound code
     MemorySize: 128    # Minimum needed for these handlers; keeps cost near-zero
@@ -75,10 +75,10 @@ Resources:
       Description: Shared Node.js dependencies for Jobster Lambda functions
       ContentUri: ./
       CompatibleRuntimes:
-        - nodejs20.x
+        - nodejs24.x
       RetentionPolicy: Delete  # Remove old layer versions on update
     Metadata:
-      BuildMethod: nodejs20.x
+      BuildMethod: nodejs24.x
       BuildProperties:
         EntryPoints:
           - package.json
@@ -161,7 +161,9 @@ Resources:
               - Effect: Allow
                 Action:
                   - dynamodb:PutItem   # register: create user records
-                  - dynamodb:GetItem   # login: fetch user by email-keyed PK
+                  - dynamodb:GetItem   # login: fetch user by email or userId
+                  - dynamodb:UpdateItem   
+                  - dynamodb:DeleteItem   
                 Resource:
                   - !GetAtt JobsterTable.Arn
                   - !Sub '${JobsterTable.Arn}/index/GSI1'
@@ -191,6 +193,8 @@ Resources:
                   - dynamodb:PutItem   # createJob
                   - dynamodb:GetItem   # getJob
                   - dynamodb:Query     # getAllJobs (by user PK + SK prefix)
+                  - dynamodb:UpdateItem   
+                  - dynamodb:DeleteItem
                 Resource:
                   - !GetAtt JobsterTable.Arn
                   # No GSI ARN here — jobs functions never touch GSI1
@@ -239,8 +243,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub 'jobster-auth-register-${Environment}'
-      CodeUri: src/handlers/
-      Handler: auth-register.handler
+      CodeUri: src/
+      Handler: handlers/auth-register.handler
       Role: !GetAtt AuthFunctionRole.Arn
       Description: 'POST /api/v1/auth/register — create a new Jobster user account'
       Events:
@@ -256,8 +260,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub 'jobster-auth-login-${Environment}'
-      CodeUri: src/handlers/
-      Handler: auth-login.handler
+      CodeUri: src/
+      Handler: handlers/auth-login.handler
       Role: !GetAtt AuthFunctionRole.Arn
       Description: 'POST /api/v1/auth/login — authenticate and receive JWT'
       Events:
@@ -273,8 +277,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub 'jobster-jobs-get-all-${Environment}'
-      CodeUri: src/handlers/
-      Handler: jobs-get-all.handler
+      CodeUri: src/
+      Handler: handlers/jobs-get-all.handler
       Role: !GetAtt JobsFunctionRole.Arn
       Description: 'GET /api/v1/jobs — search and list jobs with filters, sort, pagination'
       Events:
@@ -290,8 +294,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub 'jobster-jobs-create-${Environment}'
-      CodeUri: src/handlers/
-      Handler: jobs-create.handler
+      CodeUri: src/
+      Handler: handlers/jobs-create.handler
       Role: !GetAtt JobsFunctionRole.Arn
       Description: 'POST /api/v1/jobs — create a new job listing'
       Events:
@@ -307,8 +311,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub 'jobster-jobs-get-one-${Environment}'
-      CodeUri: src/handlers/
-      Handler: jobs-get-one.handler
+      CodeUri: src/
+      Handler: handlers/jobs-get-one.handler
       Role: !GetAtt JobsFunctionRole.Arn
       Description: 'GET /api/v1/jobs/{id} — fetch a single job by ID (ownership-scoped)'
       Events:
@@ -318,6 +322,74 @@ Resources:
             RestApiId: !Ref JobsterApi
             Path: /api/v1/jobs/{id}
             Method: GET
+
+      # ── LAMBDA: Update Job ──────────────────────────────────────────────────────
+  UpdateJobFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'jobster-jobs-update-${Environment}'
+      CodeUri: src/
+      Handler: handlers/jobs-update.handler
+      Role: !GetAtt JobsFunctionRole.Arn
+      Description: 'PATCH /api/v1/jobs/{id} — update a job listing'
+      Events:
+        UpdateJobApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref JobsterApi
+            Path: /api/v1/jobs/{id}
+            Method: PATCH
+
+  # ── LAMBDA: Delete Job ──────────────────────────────────────────────────────
+  DeleteJobFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'jobster-jobs-delete-${Environment}'
+      CodeUri: src/
+      Handler: handlers/jobs-delete.handler
+      Role: !GetAtt JobsFunctionRole.Arn
+      Description: 'DELETE /api/v1/jobs/{id} — delete a job listing'
+      Events:
+        DeleteJobApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref JobsterApi
+            Path: /api/v1/jobs/{id}
+            Method: DELETE
+
+  # ── LAMBDA: Job Stats ───────────────────────────────────────────────────────
+  JobStatsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'jobster-jobs-stats-${Environment}'
+      CodeUri: src/
+      Handler: handlers/jobs-stats.handler
+      Role: !GetAtt JobsFunctionRole.Arn
+      Description: 'GET /api/v1/jobs/stats — job status counts and monthly chart data'
+      Events:
+        JobStatsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref JobsterApi
+            Path: /api/v1/jobs/stats
+            Method: GET
+
+  # ── LAMBDA: Update User ─────────────────────────────────────────────────────
+  UpdateUserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'jobster-auth-update-user-${Environment}'
+      CodeUri: src/
+      Handler: handlers/auth-update-user.handler
+      Role: !GetAtt AuthFunctionRole.Arn
+      Description: 'PATCH /api/v1/auth/updateUser — update user profile'
+      Events:
+        UpdateUserApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref JobsterApi
+            Path: /api/v1/auth/updateUser
+            Method: PATCH
 
   # ── S3 BUCKET: Frontend Static Site ─────────────────────────────────────────
   FrontendBucket:

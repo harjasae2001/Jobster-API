@@ -24,6 +24,7 @@ const AddJob = () => {
   } = useSelector((store) => store.job);
   const { user } = useSelector((store) => store.user);
   const dispatch = useDispatch();
+  console.log(editJobId);
   const handleSubmit = (e) => {
     e.preventDefault();
 

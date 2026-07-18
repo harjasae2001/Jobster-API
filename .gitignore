@@ -1,3 +1,6 @@
 /node_modules
-.env
+.env*
 /serverless/node_modules
+/serverless/.aws-sam
+/serverless/scripts
+client/build
