@@ -8,7 +8,14 @@
 //   - Mongoose unique index on email  → ConditionalCheckFailedException from DDB
 //   - Mongoose validation             → Manual field validation
 //   - mongoose ObjectId (_id)         → uuid v4 string
+//
+// Observability additions (SDE-2 standard):
+//   - Structured JSON logging via logger.js (queryable in CloudWatch Logs Insights)
+//   - Custom CloudWatch metric via EMF: UserRegistered count
+//   - X-Ray tracing applied automatically via instrumented DDB client (dynamo-client.js)
 // ─────────────────────────────────────────────────────────────────────────────
+
+'use strict';
 
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -19,8 +26,20 @@ const { StatusCodes } = require('http-status-codes');
 const { docClient, TABLE_NAME } = require('../lib/dynamo-client');
 const { success, error } = require('../lib/response');
 const { BadRequestError } = require('../lib/errors');
+const { logger } = require('../lib/logger');
+const { createMetrics } = require('../lib/metrics');
 
-exports.handler = async (event) => {
+exports.handler = async (event, context) => {
+  // ── Observability setup — one-time per invocation ──────────────────────────
+  logger.setContext(context); // Sets requestId, tracks cold start
+  const metrics = createMetrics();
+  const startTime = Date.now();
+
+  logger.info('Register handler invoked', {
+    path: event.path,
+    httpMethod: event.httpMethod,
+  });
+
   try {
     // ── 1. Parse & validate request body ──────────────────────────────────────
     const body = JSON.parse(event.body || '{}');
@@ -61,7 +80,7 @@ exports.handler = async (event) => {
       new PutCommand({
         TableName: TABLE_NAME,
         Item: {
-          PK: `USER#${email.toLowerCase()}`,  // email-keyed item (for login lookup via GSI1)
+          PK: `USER#${email.toLowerCase()}`,
           SK: 'PROFILE',
           GSI1PK: `USER#${email.toLowerCase()}`,
           GSI1SK: 'PROFILE',
@@ -75,8 +94,6 @@ exports.handler = async (event) => {
           updatedAt: now,
           entityType: 'USER',
         },
-        // ConditionExpression: only succeed if this item does NOT already exist
-        // This replaces Mongoose's `unique: true` on the email field
         ConditionExpression: 'attribute_not_exists(PK)',
       })
     );
@@ -107,10 +124,28 @@ exports.handler = async (event) => {
       { expiresIn: process.env.JWT_LIFETIME || '1d' }
     );
 
+    // ── 6. Emit observability signals ─────────────────────────────────────────
+    const duration = Date.now() - startTime;
+    logger.info('User registered successfully', { userId, email: email.toLowerCase(), duration });
+    metrics
+      .record('UserRegistered', 1)
+      .record('HandlerDuration', duration, 'Milliseconds')
+      .flush();
+
     return success(StatusCodes.CREATED, {
       user: { email: email.toLowerCase(), lastName, location, name, token },
     });
   } catch (err) {
+    const duration = Date.now() - startTime;
+
+    if (err.name === 'ConditionalCheckFailedException') {
+      logger.warn('Registration rejected — duplicate email', { duration });
+      metrics.record('RegistrationConflict', 1).flush();
+      return error({ statusCode: 409, message: 'Email already in use' });
+    }
+
+    logger.error('Register handler error', { error: err, duration });
+    metrics.record('HandlerError', 1).flush();
     return error(err);
   }
 };

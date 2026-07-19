@@ -14,18 +14,24 @@
     "local:get-job": "sam local invoke GetJobFunction -e events/jobs-get-one.json",
     "local:api": "sam local start-api",
     "seed": "node scripts/seed.js",
-    "validate": "sam validate"
+    "validate": "sam validate",
+    "test": "jest --forceExit",
+    "test:integration": "jest --testPathPattern=integration --forceExit",
+    "test:watch": "jest --watch"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.600.0",
     "@aws-sdk/lib-dynamodb": "^3.600.0",
+    "aws-xray-sdk-core": "^3.10.3",
     "bcryptjs": "^2.4.3",
     "http-status-codes": "^2.3.0",
     "jsonwebtoken": "^9.0.2",
     "uuid": "^11.1.1"
   },
   "devDependencies": {
-    "dotenv": "^16.4.5"
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "jest": "^29.7.0"
   },
   "engines": {
     "node": ">=20.0.0"

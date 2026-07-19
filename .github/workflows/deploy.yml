@@ -1,0 +1,181 @@
+name: Deploy to Production
+
+# ── Trigger ───────────────────────────────────────────────────────────────────
+# Only runs when serverless code or this workflow file changes.
+# Pushing frontend-only changes or docs won't trigger a Lambda deploy.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'serverless/**'
+      - '.github/workflows/deploy.yml'
+
+env:
+  AWS_REGION: ap-south-1
+  STACK_NAME: jobster-serverless
+  NODE_VERSION: '20'
+
+jobs:
+  # ── Job 1: Validate ──────────────────────────────────────────────────────────
+  # Fast-fail before touching AWS — catches syntax errors and template mistakes
+  # in under 60 seconds without consuming any AWS resources.
+  validate:
+    name: ✅ Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: serverless/package-lock.json
+
+      - name: Set up Python (required by SAM CLI)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install SAM CLI
+        run: pip install aws-sam-cli
+
+      - name: Install Node dependencies
+        working-directory: serverless
+        run: npm ci
+
+      - name: Syntax check — all handler and lib files
+        working-directory: serverless
+        run: |
+          echo "Running Node.js syntax check on all source files..."
+          failed=0
+          for f in src/lib/*.js src/handlers/*.js; do
+            if node --check "$f" 2>&1; then
+              echo "  OK $f"
+            else
+              echo "  FAILED $f"
+              failed=1
+            fi
+          done
+          if [ $failed -ne 0 ]; then
+            echo "Syntax check failed"
+            exit 1
+          fi
+          echo "All syntax checks passed"
+
+      - name: Validate SAM template
+        working-directory: serverless
+        run: sam validate --lint
+
+  # ── Job 2: Deploy ─────────────────────────────────────────────────────────────
+  deploy:
+    name: 🚀 Deploy
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      api-url: ${{ steps.outputs.outputs.api-url }}
+      table-name: ${{ steps.outputs.outputs.table-name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: serverless/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install SAM CLI
+        run: pip install aws-sam-cli
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Node dependencies
+        working-directory: serverless
+        run: npm ci
+
+      - name: SAM Build
+        working-directory: serverless
+        run: sam build --no-cached --parallel
+
+      - name: SAM Deploy
+        working-directory: serverless
+        run: |
+          sam deploy \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --resolve-s3 \
+            --s3-prefix ${{ env.STACK_NAME }} \
+            --parameter-overrides \
+              "Environment=production JwtSecret=${{ secrets.JWT_SECRET }} JwtLifetime=1d FrontendBucketSuffix=a7f3k9"
+
+      - name: Capture stack outputs
+        id: outputs
+        run: |
+          API_ENDPOINT=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
+            --output text)
+          TABLE_NAME=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='DynamoDBTableName'].OutputValue" \
+            --output text)
+          API_URL="${API_ENDPOINT}/api/v1"
+          echo "api-url=${API_URL}" >> $GITHUB_OUTPUT
+          echo "table-name=${TABLE_NAME}" >> $GITHUB_OUTPUT
+          echo "Deployed to: ${API_URL}"
+
+  # ── Job 3: Integration Tests ───────────────────────────────────────────────
+  integration-test:
+    name: 🧪 Integration Tests
+    needs: deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: serverless/package-lock.json
+
+      - name: Install Node dependencies
+        working-directory: serverless
+        run: npm ci
+
+      - name: Run integration tests
+        working-directory: serverless
+        env:
+          API_URL: ${{ needs.deploy.outputs.api-url }}
+        run: npm test -- --forceExit
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results-${{ github.sha }}
+          path: serverless/test-results/
+          retention-days: 30
+          if-no-files-found: ignore

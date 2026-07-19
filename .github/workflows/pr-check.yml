@@ -1,0 +1,90 @@
+name: PR Checks
+
+# ── Trigger ───────────────────────────────────────────────────────────────────
+# Runs on every PR targeting main, but ONLY if serverless code or workflows changed.
+# PRs never deploy to production — validation only.
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'serverless/**'
+      - '.github/workflows/**'
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  validate:
+    name: ✅ Validate PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: serverless/package-lock.json
+
+      - name: Set up Python (required by SAM CLI)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install SAM CLI
+        run: pip install aws-sam-cli
+
+      - name: Install Node dependencies
+        working-directory: serverless
+        run: npm ci
+
+      - name: Syntax check — all handler and lib files
+        working-directory: serverless
+        run: |
+          echo "Running Node.js syntax check..."
+          failed=0
+          for f in src/lib/*.js src/handlers/*.js; do
+            if node --check "$f" 2>&1; then
+              echo "  OK $f"
+            else
+              echo "  FAILED $f"
+              failed=1
+            fi
+          done
+          if [ $failed -ne 0 ]; then
+            exit 1
+          fi
+          echo "All syntax checks passed"
+
+      - name: Validate SAM template
+        working-directory: serverless
+        run: sam validate --lint
+
+      - name: Post validation summary to PR
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ job.status }}';
+            const icon = status === 'success' ? '✅' : '❌';
+            const message = status === 'success'
+              ? 'All syntax checks and SAM template validation passed.'
+              : 'Validation failed — check the Actions log for details.';
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: [
+                `## ${icon} SAM Validation — ${status.toUpperCase()}`,
+                '',
+                message,
+                '',
+                `**Commit:** \`${context.sha.slice(0, 7)}\``,
+                `**Workflow:** [View run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+              ].join('\n'),
+            });

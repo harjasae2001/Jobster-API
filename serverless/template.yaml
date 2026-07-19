@@ -52,12 +52,17 @@ Globals:
       - arm64          # Graviton2 — ~20% cheaper than x86, same performance for I/O-bound code
     MemorySize: 128    # Minimum needed for these handlers; keeps cost near-zero
     Timeout: 10        # Generous timeout; DynamoDB calls are typically < 100ms
+    Tracing: Active    # Enable AWS X-Ray — captures cold start, handler duration, DDB latency
+                       # INTERVIEW NOTE: 'Active' samples 5% of requests automatically.
+                       # 'PassThrough' only traces when upstream (API GW) requests tracing.
+                       # 'Active' is correct here since API GW is our entry point.
     Environment:
       Variables:
         TABLE_NAME: !Ref JobsterTable
         JWT_SECRET: !Ref JwtSecret
         JWT_LIFETIME: !Ref JwtLifetime
         AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'  # Reuse HTTP keep-alive connections to DDB
+        ENVIRONMENT: !Ref Environment              # Used by EMF metrics for dimension
     Layers:
       - !Ref DependenciesLayer  # Shared node_modules layer to keep function ZIPs small
 
@@ -150,6 +155,11 @@ Resources:
       ManagedPolicyArns:
         # Basic Lambda execution: CloudWatch Logs write access
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        # X-Ray: allows Lambda to send trace segments to the X-Ray daemon
+        # INTERVIEW NOTE: The X-Ray daemon runs as a sidecar process inside the
+        # Lambda execution environment — Lambda handles it automatically when
+        # Tracing: Active is set. This policy just grants write permission.
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
       Policies:
         - PolicyName: DynamoDBAuthAccess
           PolicyDocument:
@@ -162,8 +172,8 @@ Resources:
                 Action:
                   - dynamodb:PutItem   # register: create user records
                   - dynamodb:GetItem   # login: fetch user by email or userId
-                  - dynamodb:UpdateItem   
-                  - dynamodb:DeleteItem   
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
                 Resource:
                   - !GetAtt JobsterTable.Arn
                   - !Sub '${JobsterTable.Arn}/index/GSI1'
@@ -182,6 +192,7 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess  # X-Ray trace segments
       Policies:
         - PolicyName: DynamoDBJobsAccess
           PolicyDocument:
@@ -193,7 +204,7 @@ Resources:
                   - dynamodb:PutItem   # createJob
                   - dynamodb:GetItem   # getJob
                   - dynamodb:Query     # getAllJobs (by user PK + SK prefix)
-                  - dynamodb:UpdateItem   
+                  - dynamodb:UpdateItem
                   - dynamodb:DeleteItem
                 Resource:
                   - !GetAtt JobsterTable.Arn
@@ -391,6 +402,253 @@ Resources:
             Path: /api/v1/auth/updateUser
             Method: PATCH
 
+  # ── SNS: Alarm Notification Topic ──────────────────────────────────────────
+  # All CloudWatch Alarms publish to this topic.
+  # Add more subscriptions (PagerDuty, Slack webhook, etc.) here as the system grows.
+  AlarmNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'jobster-alarms-${Environment}'
+      Tags:
+        - Key: Project
+          Value: Jobster
+
+  # Email subscription — harjas.singh.dev@gmail.com receives alarm notifications
+  # IMPORTANT: AWS sends a confirmation email to this address after first deploy.
+  # You must click the confirmation link for notifications to start.
+  AlarmEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlarmNotificationTopic
+      Protocol: email
+      Endpoint: harjas.singh.dev@gmail.com
+
+  # ── CLOUDWATCH ALARM: Lambda Errors ─────────────────────────────────────────
+  # Fires if any Lambda function throws more than 5 errors in a 5-minute window.
+  # Covers ALL Lambda errors from ALL functions in this account/region.
+  # INTERVIEW NOTE: Lambda errors = unhandled exceptions that crash the handler.
+  # Caught errors returned as 4xx/5xx responses are NOT Lambda errors — they
+  # complete successfully from Lambda's perspective.
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'Jobster-LambdaErrors-${Environment}'
+      AlarmDescription: 'Lambda function error rate exceeded 5 in 5 minutes — check CloudWatch Logs'
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub 'jobster-auth-register-${Environment}'
+      Statistic: Sum
+      Period: 300       # 5-minute evaluation window
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching  # No data = no alarms (not an error condition)
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
+
+  # ── CLOUDWATCH ALARM: API Gateway 5xx Errors ─────────────────────────────────
+  # Fires on 3+ server errors in 5 minutes on any API endpoint.
+  # 5xx errors indicate Lambda crashes or unhandled exceptions.
+  ApiGateway5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'Jobster-ApiGateway5xx-${Environment}'
+      AlarmDescription: 'API Gateway 5xx error rate exceeded 3 in 5 minutes'
+      Namespace: AWS/ApiGateway
+      MetricName: 5XXError
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub 'jobster-api-${Environment}'
+        - Name: Stage
+          Value: !Ref Environment
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
+
+  # ── CLOUDWATCH ALARM: DynamoDB Throttling ────────────────────────────────────
+  # Fires on ANY throttled request — zero tolerance since we use PAY_PER_REQUEST.
+  # DynamoDB throttling on on-demand mode indicates a burst exceeding 40,000 RCU/WCU.
+  # INTERVIEW NOTE: PAY_PER_REQUEST has burst limits. If traffic spikes suddenly,
+  # DDB may throttle briefly before scaling. This alarm catches that.
+  DynamoDBThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'Jobster-DynamoDBThrottles-${Environment}'
+      AlarmDescription: 'DynamoDB throttled requests detected — investigate traffic spike'
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions:
+        - Name: TableName
+          Value: !Ref JobsterTable
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
+
+  # ── CLOUDWATCH ALARM: Lambda p99 Duration ────────────────────────────────────
+  # Fires when 99th percentile response time exceeds 3 seconds.
+  # p99 (not average) catches tail latency — the slowest 1% of requests.
+  # INTERVIEW NOTE: Averaging hides outliers. A p99 of 3s means 1 in 100
+  # users waits 3s+ — that's a real user experience problem even if avg is 200ms.
+  LambdaDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'Jobster-LambdaDuration-p99-${Environment}'
+      AlarmDescription: 'Lambda p99 duration exceeded 3000ms — possible cold start or DDB latency spike'
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub 'jobster-jobs-get-all-${Environment}'
+      ExtendedStatistic: p99  # CloudWatch percentile statistic
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
+
+  # ── CLOUDWATCH DASHBOARD ──────────────────────────────────────────────────────
+  # Operational overview: Lambda health, API Gateway traffic, DynamoDB usage, custom metrics.
+  # Access at: https://ap-south-1.console.aws.amazon.com/cloudwatch/home#dashboards
+  JobsterDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub 'JobsterDashboard-${Environment}'
+      DashboardBody: !Sub |-
+        {
+          "widgets": [
+            {
+              "type": "alarm",
+              "x": 0, "y": 0, "width": 24, "height": 2,
+              "properties": {
+                "title": "Alarm Status",
+                "alarms": [
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:Jobster-LambdaErrors-${Environment}",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:Jobster-ApiGateway5xx-${Environment}",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:Jobster-DynamoDBThrottles-${Environment}",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:Jobster-LambdaDuration-p99-${Environment}"
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 2, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda Invocations & Errors",
+                "view": "timeSeries",
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "jobster-auth-register-${Environment}", {"label": "register"}],
+                  ["AWS/Lambda", "Invocations", "FunctionName", "jobster-auth-login-${Environment}", {"label": "login"}],
+                  ["AWS/Lambda", "Invocations", "FunctionName", "jobster-jobs-get-all-${Environment}", {"label": "getAllJobs"}],
+                  ["AWS/Lambda", "Invocations", "FunctionName", "jobster-jobs-create-${Environment}", {"label": "createJob"}],
+                  ["AWS/Lambda", "Errors", "FunctionName", "jobster-auth-register-${Environment}", {"label": "register errors", "color": "#d62728"}]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 2, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda Duration — p50 / p99 (ms)",
+                "view": "timeSeries",
+                "metrics": [
+                  ["AWS/Lambda", "Duration", "FunctionName", "jobster-jobs-get-all-${Environment}", {"stat": "p50", "label": "getAllJobs p50"}],
+                  ["AWS/Lambda", "Duration", "FunctionName", "jobster-jobs-get-all-${Environment}", {"stat": "p99", "label": "getAllJobs p99", "color": "#ff7f0e"}],
+                  ["AWS/Lambda", "Duration", "FunctionName", "jobster-auth-register-${Environment}", {"stat": "p50", "label": "register p50"}],
+                  ["AWS/Lambda", "Duration", "FunctionName", "jobster-auth-register-${Environment}", {"stat": "p99", "label": "register p99", "color": "#d62728"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 8, "width": 12, "height": 6,
+              "properties": {
+                "title": "API Gateway — Request Count & Error Rates",
+                "view": "timeSeries",
+                "metrics": [
+                  ["AWS/ApiGateway", "Count", "ApiName", "jobster-api-${Environment}", "Stage", "${Environment}", {"label": "Total Requests"}],
+                  ["AWS/ApiGateway", "4XXError", "ApiName", "jobster-api-${Environment}", "Stage", "${Environment}", {"label": "4xx Errors", "color": "#ff7f0e"}],
+                  ["AWS/ApiGateway", "5XXError", "ApiName", "jobster-api-${Environment}", "Stage", "${Environment}", {"label": "5xx Errors", "color": "#d62728"}]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 8, "width": 12, "height": 6,
+              "properties": {
+                "title": "DynamoDB — Consumed Capacity",
+                "view": "timeSeries",
+                "metrics": [
+                  ["AWS/DynamoDB", "ConsumedReadCapacityUnits", "TableName", "JobsterTable-${Environment}", {"label": "Read CU"}],
+                  ["AWS/DynamoDB", "ConsumedWriteCapacityUnits", "TableName", "JobsterTable-${Environment}", {"label": "Write CU"}],
+                  ["AWS/DynamoDB", "SuccessfulRequestLatency", "TableName", "JobsterTable-${Environment}", "Operation", "Query", {"label": "Query Latency (ms)", "yAxis": "right"}]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 14, "width": 12, "height": 6,
+              "properties": {
+                "title": "Custom Metrics — Business Events (EMF)",
+                "view": "timeSeries",
+                "metrics": [
+                  ["Jobster/API", "UserRegistered", "Environment", "${Environment}", {"label": "Registrations"}],
+                  ["Jobster/API", "HandlerError", "Environment", "${Environment}", {"label": "Handler Errors", "color": "#d62728"}],
+                  ["Jobster/API", "RegistrationConflict", "Environment", "${Environment}", {"label": "Duplicate Emails", "color": "#ff7f0e"}]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 14, "width": 12, "height": 6,
+              "properties": {
+                "title": "Custom Metrics — Handler Duration p99 (ms)",
+                "view": "timeSeries",
+                "metrics": [
+                  ["Jobster/API", "HandlerDuration", "FunctionName", "jobster-auth-register-${Environment}", "Environment", "${Environment}", {"stat": "p99", "label": "register p99"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}"
+              }
+            }
+          ]
+        }
+
   # ── S3 BUCKET: Frontend Static Site ─────────────────────────────────────────
   FrontendBucket:
     Type: AWS::S3::Bucket
@@ -550,3 +808,15 @@ Outputs:
     Value: !GetAtt JobsterTable.Arn
     Export:
       Name: !Sub '${AWS::StackName}-TableArn'
+
+  AlarmTopicArn:
+    Description: SNS topic ARN for CloudWatch alarm notifications
+    Value: !Ref AlarmNotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-AlarmTopicArn'
+
+  DashboardURL:
+    Description: Direct link to the CloudWatch operational dashboard
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=JobsterDashboard-${Environment}'
+    Export:
+      Name: !Sub '${AWS::StackName}-DashboardURL'
