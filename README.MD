@@ -1,681 +1,674 @@
-# Jobster API
+<![CDATA[<div align="center">
 
-#### Starter
+# 🚀 Jobster API
 
-The starter is a copy of jobs-api final project, just with additional data.
+**A full-stack Job Tracking application built with a hybrid architecture:**
+**Express + MongoDB (original) alongside a production AWS Serverless stack (Lambda · DynamoDB · API Gateway · S3 · CloudFront)**
 
-#### Setup
+[![Deploy to Production](https://github.com/harjasae2001/Jobster-API/actions/workflows/deploy.yml/badge.svg)](https://github.com/harjasae2001/Jobster-API/actions/workflows/deploy.yml)
+[![PR Checks](https://github.com/harjasae2001/Jobster-API/actions/workflows/pr-check.yml/badge.svg)](https://github.com/harjasae2001/Jobster-API/actions/workflows/pr-check.yml)
 
-- navigate to 06.5-jobster-api/starter
-- install dependencies
+**Live Frontend →** [https://d2t3sgj258ubhc.cloudfront.net/landing](https://d2t3sgj258ubhc.cloudfront.net/landing)
 
-```sh
-npm install
-```
+</div>
 
-- create .env and provide correct values
-- you can copy from previous project (just change the DB name)
+---
 
-.env
+## Table of Contents
 
-```js
-MONGO_URI=
-JWT_SECRET=
-JWT_LIFETIME=
-```
+- [Project Overview](#project-overview)
+- [Architecture](#architecture)
+  - [Original Stack (Express + MongoDB)](#original-stack-express--mongodb)
+  - [Serverless Stack (AWS)](#serverless-stack-aws)
+  - [What Was Migrated](#what-was-migrated)
+- [Tech Stack](#tech-stack)
+- [DynamoDB Data Model](#dynamodb-data-model)
+- [API Reference](#api-reference)
+- [Observability Stack](#observability-stack)
+- [CI/CD Pipeline](#cicd-pipeline)
+- [Integration Tests](#integration-tests)
+- [Project Structure](#project-structure)
+- [Getting Started (Local Development)](#getting-started-local-development)
+  - [Prerequisites](#prerequisites)
+  - [Clone & Install](#clone--install)
+  - [Run the Express App](#run-the-express-app)
+  - [Run the Serverless Stack Locally](#run-the-serverless-stack-locally)
+- [Deployment to AWS](#deployment-to-aws)
+- [Environment Variables](#environment-variables)
+- [Cost Estimate](#cost-estimate)
 
-- start the project
+---
 
-```sh
-npm start
-```
+## Project Overview
 
-- you should see "Server is listening ...." text
+Jobster started as a conventional Express + MongoDB REST API deployed on Render. It was subsequently re-architected into a **production-grade AWS Serverless stack** to demonstrate:
 
-#### Spring Cleaning
+- **Serverless-first design** with Lambda, API Gateway, DynamoDB (Single-Table Design), S3, and CloudFront
+- **Infrastructure as Code** using AWS SAM (`template.yaml`) — the entire AWS stack is reproducible from a single file
+- **Automated CI/CD** via GitHub Actions — push to `main` → validate → deploy → integration test, automatically
+- **Enterprise observability** — AWS X-Ray distributed tracing, CloudWatch EMF custom metrics, structured JSON logging, and automated SNS alarm emails
+- **Data modelling migration** — MongoDB document model → DynamoDB Single-Table Design with partition/sort key strategy
 
-##### Remove Swagger
+Both stacks are live and maintained in this repository. The Express app continues to serve as a reference implementation, while the serverless stack is the production deployment.
 
-- delete swagger.yaml file
-- remove these lines of code
-- delete swagger.yaml
-  app.js
+---
 
-```js
-const swaggerUI = require('swagger-ui-express');
-const YAML = require('yamljs');
-const swaggerDocument = YAML.load('./swagger.yaml');
+## Architecture
 
-app.get('/', (req, res) => {
-  res.send('<h1>Jobs API</h1><a href="/api-docs">Documentation</a>');
-});
-app.use('/api-docs', swaggerUI.serve, swaggerUI.setup(swaggerDocument));
-```
-
-#### Remove API Limiter
-
-- remove these lines of code
-
-app.js
-
-```js
-const rateLimiter = require('express-rate-limit');
-
-app.set('trust proxy', 1);
-app.use(
-  rateLimiter({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // limit each IP to 100 requests per windowMs
-  })
-);
-```
-
-#### Remove CORS
-
-- we don't want external JS apps to access our API (only our front-end)
-- remove these lines of code
-
-```js
-const cors = require('cors');
-app.use(cors());
-```
-
-#### Package.json
-
-- add "dev" script with nodemon
-- change engines to current version (in my case 16)
-
-package.json
-
-```js
-
-"scripts": {
-    "start": "node app.js",
-    "dev": "nodemon app.js"
-  },
-
-"engines": {
-    "node": "16.x"
-  }
-```
-
-- restart server with "npm run dev"
-
-##### Client Folder
-
-- let's explore client folder
-- open client folder
-- it's a react app built with CRA
-- it's the same as in my React Course (JOBSTER APP),
-  just base url points to our current server (instead of heroku app)
-
-utils/axios.js
-
-```js
-const customFetch = axios.create({
-  baseURL: '/api/v1',
-});
-```
-
-- notice the build folder (production ready application)
-- in CRA we can create build folder by running "npm run build"
-- that's the one we will use for our front-end
-
-##### Setup Front-End
-
-- require "path" module
-- setup express static (as first middleware)
-  to serve static assets from client/build
-- so now instead of public folder we are using client/build
-
-app.js
-
-```js
-const path = require('path');
-
-app.use(express.static(path.resolve(__dirname, './client/build')));
-
-// place as first middleware
-app.use(express.json());
-app.use(helmet());
-app.use(cors());
-app.use(xss());
-```
-
-- serve index.html for all routes (apart from API)
-- front-end routes pick's it up from there
-
-```js
-app.use('/api/v1/auth', authRouter);
-app.use('/api/v1/jobs', authenticateUser, jobsRouter);
-
-// serve index.html
-app.get('*', (req, res) => {
-  res.sendFile(path.resolve(__dirname, './client/build', 'index.html'));
-});
-
-app.use(notFoundMiddleware);
-app.use(errorHandlerMiddleware);
-```
-
-- navigate to localhost:5000
-- clear local storage (if necessary)
-
-#### Modify User Model
-
-- add following properties
-
-models/User.js
-
-```js
-lastName: {
-    type: String,
-    trim: true,
-    maxlength: 20,
-    default: 'lastName',
-  },
-  location: {
-    type: String,
-    trim: true,
-    maxlength: 20,
-    default: 'my city',
-  },
+### Original Stack (Express + MongoDB)
 
 ```
-
-#### Modify Response in Register and Login
-
-- change the response structure in
-  register and login controllers (just keep old StatusCodes)
-
-controllers/auth.js
-
-```js
-res.status(StatusCodes.CREATED).json({
-  user: {
-    email: user.email,
-    lastName: user.lastName,
-    location: user.location,
-    name: user.name,
-    token,
-  },
-});
+Client (React / Vite)
+        │
+        ▼
+  Express.js Server  ──── Mongoose ODM ───▶  MongoDB Atlas
+  (REST API, Node.js)
+        │
+  Deployed on: Render (Web Service)
 ```
 
-- Login and Register Works Now :):):)
+**Key libraries:** `express`, `mongoose`, `bcryptjs`, `jsonwebtoken`, `helmet`, `cors`, `express-rate-limit`, `swagger-ui-express`
 
-#### Create Test User
+---
 
-- test front-end request
-- in postman or front-end
-- make sure email and password are the same (or change the front-end)
+### Serverless Stack (AWS)
 
-```js
+```
+                        ┌─────────────────────────────────────┐
+                        │         AWS ap-south-1 (Mumbai)      │
+                        │                                      │
+  User Browser          │  CloudFront Distribution             │
+       │   ─────────────▶  (d2t3sgj258ubhc.cloudfront.net)    │
+       │                │         │           │                │
+       │                │    S3 Bucket    API Gateway          │
+       │                │  (React SPA)    (REST API)           │
+       │                │                     │                │
+       │                │              ┌──────┴──────┐         │
+       │                │              │   Lambda    │         │
+       │                │              │  Functions  │         │
+       │                │              │  (Node 24)  │         │
+       │                │              └──────┬──────┘         │
+       │                │                     │                │
+       │                │              DynamoDB Table          │
+       │                │           (Single-Table Design)      │
+       │                │                                      │
+       │                │   Observability:                     │
+       │                │   ├── X-Ray (distributed traces)     │
+       │                │   ├── CloudWatch Logs (JSON)         │
+       │                │   ├── CloudWatch Metrics (EMF)       │
+       │                │   ├── CloudWatch Alarms (4)          │
+       │                │   ├── CloudWatch Dashboard           │
+       │                │   └── SNS → Email Alerts             │
+       │                └─────────────────────────────────────┘
+```
+
+---
+
+### What Was Migrated
+
+| Feature | Express (MongoDB) | Serverless (AWS) | Notes |
+|---|---|---|---|
+| **Register** | `controllers/auth.js` → `POST /auth/register` | `handlers/auth-register.js` | Duplicate check via DDB ConditionExpression |
+| **Login** | `controllers/auth.js` → `POST /auth/login` | `handlers/auth-login.js` | GetItem by email GSI |
+| **Update User** | `controllers/auth.js` → `PATCH /auth/updateUser` | `handlers/auth-update-user.js` | UpdateItem on both PK items |
+| **Create Job** | `controllers/jobs.js` → `POST /jobs` | `handlers/jobs-create.js` | PutItem with UUID + positionLower field |
+| **Get All Jobs** | `controllers/jobs.js` → `GET /jobs` | `handlers/jobs-get-all.js` | DDB Query + in-memory filter/sort/paginate |
+| **Get Single Job** | `controllers/jobs.js` → `GET /jobs/:id` | `handlers/jobs-get-one.js` | GetItem by USER#+JOB# composite key |
+| **Update Job** | `controllers/jobs.js` → `PATCH /jobs/:id` | `handlers/jobs-update.js` | UpdateItem with ownership check |
+| **Delete Job** | `controllers/jobs.js` → `DELETE /jobs/:id` | `handlers/jobs-delete.js` | DeleteItem with ownership check |
+| **Job Stats** | `controllers/jobs.js` → `GET /jobs/stats` | `handlers/jobs-stats.js` | `$group/$sum` aggregation → JS `reduce()` |
+| **Auth JWT Middleware** | `middleware/authentication.js` | `lib/auth-middleware.js` | Same JWT verify logic |
+| **Database** | MongoDB Atlas (Mongoose) | DynamoDB (Single-Table Design) | |
+| **Deployment** | Render (Web Service) | AWS Lambda + API Gateway | |
+| **Frontend Hosting** | Render (Static Site) | S3 + CloudFront | |
+
+---
+
+## Tech Stack
+
+### Express (Original Backend)
+| Layer | Technology |
+|---|---|
+| Runtime | Node.js |
+| Framework | Express 4 |
+| Database | MongoDB Atlas via Mongoose 6 |
+| Auth | JSON Web Tokens (jsonwebtoken) |
+| Passwords | bcryptjs |
+| Validation | Joi |
+| Security | helmet, cors, express-rate-limit, xss-clean |
+| Docs | Swagger UI + YAML |
+
+### Serverless (AWS Stack)
+| Layer | Technology |
+|---|---|
+| Runtime | Node.js 24 on AWS Lambda (arm64/Graviton2) |
+| API | Amazon API Gateway (REST) |
+| Database | Amazon DynamoDB (Single-Table Design, PAY_PER_REQUEST) |
+| Frontend CDN | Amazon CloudFront + S3 |
+| IaC | AWS SAM (`template.yaml`) |
+| Auth | JSON Web Tokens — same as Express |
+| Tracing | AWS X-Ray (`aws-xray-sdk-core`) |
+| Metrics | CloudWatch EMF (Embedded Metrics Format) |
+| Logging | Structured JSON → CloudWatch Logs |
+| Alarms | CloudWatch Alarms → SNS → Email |
+| CI/CD | GitHub Actions (validate → deploy → integration test) |
+| Testing | Jest + Axios (39 integration tests against live API) |
+
+---
+
+## DynamoDB Data Model
+
+This project uses **Single-Table Design** — all entity types (Users, Jobs) live in one DynamoDB table.
+
+### Table Name
+`JobsterTable-production`
+
+### Key Schema
+
+| Key | Type | Purpose |
+|---|---|---|
+| `PK` | String (Partition Key) | Entity identifier |
+| `SK` | String (Sort Key) | Entity sub-type or child item |
+| `GSI1PK` / `GSI1SK` | String | Global Secondary Index for alternate lookups |
+
+### Access Patterns
+
+| Pattern | PK | SK | Explanation |
+|---|---|---|---|
+| Register / Get user by email | `USER#<email>` | `PROFILE` | Login lookup — email is the natural unique key |
+| Get user by ID (auth middleware) | `USERID#<userId>` | `PROFILE` | Fast O(1) lookup per request without GSI |
+| Create / Get single job | `USER#<userId>` | `JOB#<jobId>` | Composite key for ownership enforcement |
+| Get all jobs for a user | `USER#<userId>` | `begins_with('JOB#')` | Query returns all jobs for that user |
+
+### Item Shape — User
+```json
 {
-    "name":"demo user",
-    "email":"testUser@test.com",
-    "password":"secret"
+  "PK": "USER#harjas@example.com",
+  "SK": "PROFILE",
+  "userId": "e618efbe-...",
+  "name": "Harjas",
+  "email": "harjas@example.com",
+  "password": "<bcrypt hash>",
+  "lastName": "Singh",
+  "location": "Mumbai",
+  "createdAt": "2026-07-15T10:00:00.000Z",
+  "entityType": "USER"
 }
 ```
 
-- navigate to client/src/pages/Register.js
-- make sure email and password match your test user
-
-```js
-<button
-  type='button'
-  className='btn btn-block btn-hipster'
-  disabled={isLoading}
-  onClick={() =>
-  dispatch(loginUser({ email: 'testUser@test.com', password: 'secret' }))}>
-
+### Item Shape — Job
+```json
+{
+  "PK": "USER#e618efbe-...",
+  "SK": "JOB#a1b2c3d4-...",
+  "jobId": "a1b2c3d4-...",
+  "company": "Google",
+  "position": "Software Engineer",
+  "positionLower": "software engineer",
+  "status": "pending",
+  "jobType": "full-time",
+  "jobLocation": "Remote",
+  "createdAt": "2026-07-15T10:00:00.000Z",
+  "entityType": "JOB"
+}
 ```
 
-#### Update User Functionality
+> **`positionLower`** is a lowercase copy of `position` stored at write time. DynamoDB's `contains()` function in FilterExpressions is case-sensitive, so this field enables case-insensitive search without a full table scan.
 
-- import authenticateUser middleware
-- setup updateUser route (protected route)
+---
 
-routes/auth.js
+## API Reference
 
-```js
-const express = require('express');
-const router = express.Router();
-const authenticateUser = require('../middleware/authentication');
-const { register, login, updateUser } = require('../controllers/auth');
-router.post('/register', register);
-router.post('/login', login);
-router.patch('/updateUser', authenticateUser, updateUser);
+**Base URL (production):** `https://6hqcka29e6.execute-api.ap-south-1.amazonaws.com/production/api/v1`
 
-module.exports = router;
+All protected routes require:
+```
+Authorization: Bearer <JWT token>
 ```
 
-- create updateUser controller
-- setup export
+### Auth Routes
 
-controllers/auth.js
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/auth/register` | ❌ | Create a new user account |
+| `POST` | `/auth/login` | ❌ | Login and receive a JWT |
+| `PATCH` | `/auth/updateUser` | ✅ | Update name, email, location, lastName |
 
-```js
-const updateUser = async (req, res) => {
-  console.log(req.user);
-  console.log(req.body);
-};
+### Jobs Routes
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/jobs` | ✅ | List all jobs (filter, sort, paginate) |
+| `POST` | `/jobs` | ✅ | Create a new job |
+| `GET` | `/jobs/stats` | ✅ | Get status counts and monthly applications |
+| `GET` | `/jobs/:id` | ✅ | Get a single job by ID |
+| `PATCH` | `/jobs/:id` | ✅ | Update a job |
+| `DELETE` | `/jobs/:id` | ✅ | Delete a job |
+
+### GET /jobs — Query Parameters
+
+| Parameter | Values | Default | Description |
+|---|---|---|---|
+| `status` | `pending`, `interview`, `declined`, `all` | `all` | Filter by application status |
+| `jobType` | `full-time`, `part-time`, `remote`, `internship`, `all` | `all` | Filter by job type |
+| `search` | Any string | — | Case-insensitive position title search |
+| `sort` | `latest`, `oldest`, `a-z`, `z-a` | `latest` | Sort order |
+| `page` | Number | `1` | Page number |
+| `limit` | Number (max 100) | `10` | Results per page |
+
+### Session Timeout
+JWT tokens expire after **1 day (`1d`)**. There is no refresh token — the client must re-login after expiry.
+
+---
+
+## Observability Stack
+
+### AWS X-Ray — Distributed Tracing
+
+All 9 Lambda functions have `Tracing: Active` enabled. The DynamoDB client is wrapped with `captureAWSv3Client` in `lib/dynamo-client.js` — this is applied **once at the module level**, so every handler automatically gets DynamoDB subsegments in X-Ray without any per-handler changes.
+
+**What you see in the X-Ray Service Map:**
+```
+API Gateway → Lambda (handler) → DynamoDB
+    (5ms)         (45ms)           (18ms)
 ```
 
-- complete updateUser
+**X-Ray Console:** AWS Console → X-Ray → Service Map
 
-controllers/auth.js
+### Structured JSON Logging
 
-```js
-const updateUser = async (req, res) => {
-  const { email, name, lastName, location } = req.body;
-  if (!email || !name || !lastName || !location) {
-    throw new BadRequestError('Please provide all values');
-  }
-  const user = await User.findOne({ _id: req.user.userId });
-
-  user.email = email;
-  user.name = name;
-  user.lastName = lastName;
-  user.location = location;
-
-  await user.save();
-
-  const token = user.createJWT();
-
-  res.status(StatusCodes.OK).json({
-    user: {
-      email: user.email,
-      lastName: user.lastName,
-      location: user.location,
-      name: user.name,
-      token,
-    },
-  });
-};
-```
-
-- Why New Token?
-
-#### GOTCHA
-
-- this.modifiedPaths();
-
-```js
-UserSchema.pre('save', async function () {
-  if (!this.isModified('password')) return;
-  const salt = await bcrypt.genSalt(10);
-  this.password = await bcrypt.hash(this.password, salt);
-});
-```
-
-#### Modify Job Model
-
-- add following properties
-
-models/Job.js
-
-```js
-jobType: {
-      type: String,
-      enum: ['full-time', 'part-time', 'remote', 'internship'],
-      default: 'full-time',
-    },
-    jobLocation: {
-      type: String,
-      default: 'my city',
-      required: true,
-    },
-```
-
-- default property just for fun, values will be provided by front-end
-
-#### Setup Mock Data
-
-- [Mockaroo](https://www.mockaroo.com/)
-- create mock-data.json (root)
-- provide test user id
-
-#### Populate DB
-
-- create populate.js
-
-populate.js
-
-```js
-require('dotenv').config();
-
-const mockData = require('./mock-data.json');
-
-const Job = require('./models/Job');
-const connectDB = require('./db/connect');
-
-const start = async () => {
-  try {
-    await connectDB(process.env.MONGO_URI);
-
-    await Job.create(mockData);
-    console.log('Success!!!');
-    process.exit(0);
-  } catch (error) {
-    console.log(error);
-    process.exit(1);
-  }
-};
-
-start();
-```
-
-#### Modify Get All Jobs
-
-- latest mongoose version change
-
-controllers/jobs.js
-
-```js
-const getAllJobs = async (req, res) => {
-  const { search, status, jobType, sort } = req.query;
-
-  // protected route
-  const queryObject = {
-    createdBy: req.user.userId,
-  };
-
-  if (search) {
-    queryObject.position = { $regex: search, $options: 'i' };
-  }
-  // add stuff based on condition
-
-  if (status && status !== 'all') {
-    queryObject.status = status;
-  }
-  if (jobType && jobType !== 'all') {
-    queryObject.jobType = jobType;
-  }
-
-  // NO AWAIT
-
-  let result = Job.find(queryObject);
-
-  // chain sort conditions
-
-  if (sort === 'latest') {
-    result = result.sort('-createdAt');
-  }
-  if (sort === 'oldest') {
-    result = result.sort('createdAt');
-  }
-  if (sort === 'a-z') {
-    result = result.sort('position');
-  }
-  if (sort === 'z-a') {
-    result = result.sort('-position');
-  }
-
-  //
-
-  // setup pagination
-  const page = Number(req.query.page) || 1;
-  const limit = Number(req.query.limit) || 10;
-  const skip = (page - 1) * limit;
-
-  result = result.skip(skip).limit(limit);
-
-  const jobs = await result;
-
-  const totalJobs = await Job.countDocuments(queryObject);
-  const numOfPages = Math.ceil(totalJobs / limit);
-
-  res.status(StatusCodes.OK).json({ jobs, totalJobs, numOfPages });
-};
-```
-
-#### Make Test User Read-Only
-
-middleware/authentication.js
-
-```js
-const payload = jwt.verify(token, process.env.JWT_SECRET);
-const testUser = payload.userId === '62eff8bcdb9af70b4155349d';
-req.user = { userId: payload.userId, testUser };
-```
-
-- create testingUser in middleware
-
-middleware/testUser
-
-```js
-const { BadRequestError } = require('../errors');
-
-const testUser = (req, res, next) => {
-  if (req.user.testUser) {
-    throw new BadRequestError('Test User. Read Only!');
-  }
-  next();
-};
-
-module.exports = testUser;
-```
-
-- add to auth routes (updateUser)
-
-```js
-const express = require('express');
-const router = express.Router();
-const authenticateUser = require('../middleware/authentication');
-const testUser = require('../middleware/testUser');
-const { register, login, updateUser } = require('../controllers/auth');
-
-router.post('/register', register);
-router.post('/login', login);
-router.patch('/updateUser', authenticateUser, testUser, updateUser);
-
-module.exports = router;
-```
-
-- add to job routes (createJob, updateJob, deleteJob)
-
-routes/jobs.js
-
-```js
-const express = require('express');
-
-const router = express.Router();
-const {
-  createJob,
-  deleteJob,
-  getAllJobs,
-  updateJob,
-  getJob,
-  showStats,
-} = require('../controllers/jobs');
-const testUser = require('../middleware/testUser');
-
-router.route('/').post(testUser, createJob).get(getAllJobs);
-router.route('/stats').get(showStats);
-router
-  .route('/:id')
-  .get(getJob)
-  .delete(testUser, deleteJob)
-  .patch(testUser, updateJob);
-
-module.exports = router;
-```
-
-#### API Limiter
-
-routes/auth.js
-
-```js
-const express = require('express');
-const router = express.Router();
-const authenticateUser = require('../middleware/authentication');
-const testUser = require('../middleware/testUser');
-const { register, login, updateUser } = require('../controllers/auth');
-
-const rateLimiter = require('express-rate-limit');
-const apiLimiter = rateLimiter({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10,
-  message: {
-    msg: 'Too many requests from this IP, please try again after 15 minutes',
-  },
-});
-
-router.post('/register', apiLimiter, register);
-router.post('/login', apiLimiter, login);
-router.patch('/updateUser', authenticateUser, testUser, updateUser);
-
-module.exports = router;
-```
-
-app.js
-
-```js
-app.set('trust proxy', 1);
-
-app.use(express.static(path.resolve(__dirname, './client/build')));
-```
-
-#### Setup Stats Route
-
-controllers/jobs
-
-```js
-const showStats = (req, res) => {
-  res
-    .status(StatusCodes.OK)
-    .json({ defaultStats: {}, monthlyApplications: [] });
-};
-
-module.exports = {
-  createJob,
-  deleteJob,
-  getAllJobs,
-  updateJob,
-  getJob,
-  showStats,
-};
-```
-
-routes/jobs.js
-
-```js
-const express = require('express');
-
-const router = express.Router();
-const {
-  createJob,
-  deleteJob,
-  getAllJobs,
-  updateJob,
-  getJob,
-  showStats,
-} = require('../controllers/jobs');
-
-router.route('/').post(createJob).get(getAllJobs);
-router.route('/stats').get(showStats);
-router.route('/:id').get(getJob).delete(deleteJob).patch(updateJob);
-
-module.exports = router;
-```
-
-- npm install moment
-- import mongoose and moment
-
-controllers/jobs
-
-```js
-const mongoose = require('mongoose');
-const moment = require('moment');
-```
-
-- [Javascript Nuggets - Reduce Basics](https://youtu.be/3WkW9nrS2mw)
-- [Javascript Nuggets - Reduce (object example)](https://youtu.be/5BFkp8JjLEY)
-
-controllers/jobs
-
-```js
-const showStats = async (req, res) => {
-  let stats = await Job.aggregate([
-    { $match: { createdBy: mongoose.Types.ObjectId(req.user.userId) } },
-    { $group: { _id: '$status', count: { $sum: 1 } } },
-  ]);
-
-  stats = stats.reduce((acc, curr) => {
-    const { _id: title, count } = curr;
-    acc[title] = count;
-    return acc;
-  }, {});
-
-  const defaultStats = {
-    pending: stats.pending || 0,
-    interview: stats.interview || 0,
-    declined: stats.declined || 0,
-  };
-
-  let monthlyApplications = await Job.aggregate([
-    { $match: { createdBy: mongoose.Types.ObjectId(req.user.userId) } },
-    {
-      $group: {
-        _id: { year: { $year: '$createdAt' }, month: { $month: '$createdAt' } },
-        count: { $sum: 1 },
-      },
-    },
-    { $sort: { '_id.year': -1, '_id.month': -1 } },
-    { $limit: 6 },
-  ]);
-  monthlyApplications = monthlyApplications
-    .map((item) => {
-      const {
-        _id: { year, month },
-        count,
-      } = item;
-      const date = moment()
-        .month(month - 1)
-        .year(year)
-        .format('MMM Y');
-      return { date, count };
-    })
-    .reverse();
-
-  res.status(StatusCodes.OK).json({ defaultStats, monthlyApplications });
-};
-```
-
-#### Deploy
-
-- remove existing git repo
-
-- add reverse() in showStats
-
-controllers/jobs.js
-
-```js
-monthlyApplications = monthlyApplications
-  .map((item) => {
-    const {
-      _id: { year, month },
-      count,
-    } = item;
-    const date = moment()
-      .month(month - 1)
-      .year(year)
-      .format('MMM Y');
-    return { date, count };
-  })
-  .reverse();
-```
-
-- remove Procfile
-- remove engines from package.json
+Every handler uses `lib/logger.js` which writes one JSON object per log call to stdout. CloudWatch Logs Insights can query these fields directly.
 
 ```json
-"engines": {
-    "node": "16.x"
-  }
+{
+  "timestamp": "2026-07-19T11:45:00.000Z",
+  "level": "INFO",
+  "message": "User registered successfully",
+  "requestId": "abc-123",
+  "functionName": "jobster-auth-register-production",
+  "coldStart": false,
+  "userId": "e618efbe-...",
+  "duration": 47
+}
 ```
 
-- fix build folder (remove /build from client/.gitignore)
-- setup new github repo
-- deploy to render
+**Sample Logs Insights query:**
+```
+fields @timestamp, level, message, userId, duration
+| filter level = "ERROR"
+| sort @timestamp desc
+| limit 20
+```
+
+### Custom Metrics (EMF)
+
+`lib/metrics.js` uses CloudWatch Embedded Metrics Format — custom metrics are emitted as JSON to stdout with zero extra API calls or latency. They appear in the `Jobster/API` CloudWatch namespace.
+
+| Metric | Unit | Description |
+|---|---|---|
+| `UserRegistered` | Count | Successful new registrations |
+| `HandlerDuration` | Milliseconds | End-to-end handler execution time |
+| `HandlerError` | Count | Unhandled/unexpected errors |
+| `RegistrationConflict` | Count | Duplicate email registration attempts |
+
+### CloudWatch Alarms (4)
+
+| Alarm | Threshold | Action |
+|---|---|---|
+| `Jobster-LambdaErrors-production` | > 5 Lambda errors in 5 min | SNS email |
+| `Jobster-ApiGateway5xx-production` | > 3 API Gateway 5xx in 5 min | SNS email |
+| `Jobster-DynamoDBThrottles-production` | > 0 throttled requests | SNS email |
+| `Jobster-LambdaDuration-p99-production` | p99 > 3000ms | SNS email |
+
+### CloudWatch Dashboard
+
+A 6-widget operational dashboard is deployed automatically with the stack:
+
+**Direct link:** `https://ap-south-1.console.aws.amazon.com/cloudwatch/home?region=ap-south-1#dashboards:name=JobsterDashboard-production`
+
+Widgets: Alarm status strip · Lambda invocations & errors · Lambda p50/p99 duration · API Gateway traffic & error rates · DynamoDB consumed capacity · Custom EMF business metrics
+
+---
+
+## CI/CD Pipeline
+
+Defined in `.github/workflows/deploy.yml`. Triggers on every push to `main` that touches the `serverless/` directory.
+
+```
+Push to main
+      │
+      ▼
+  ✅ Validate (45s)
+  ├── Node.js syntax check on all src/ files
+  └── sam validate --lint (CloudFormation linter)
+      │ (fails fast, no AWS cost)
+      ▼
+  🚀 Deploy (3-4 min)
+  ├── sam build --parallel
+  ├── sam deploy --no-confirm-changeset
+  └── Capture API URL from CloudFormation outputs
+      │
+      ▼
+  🧪 Integration Tests (4-5 min)
+  ├── 39 Jest tests against the live deployed API
+  └── Upload test artifacts to GitHub Actions
+```
+
+### GitHub Secrets Required
+
+| Secret | Description |
+|---|---|
+| `AWS_ACCESS_KEY_ID` | IAM access key for the deploy user |
+| `AWS_SECRET_ACCESS_KEY` | IAM secret key for the deploy user |
+| `JWT_SECRET` | JWT signing secret (must match deployed stack) |
+
+**Add secrets at:** `https://github.com/harjasae2001/Jobster-API/settings/secrets/actions`
+
+### PR Check Workflow
+
+`.github/workflows/pr-check.yml` runs on every PR targeting `main` — syntax check + SAM lint only, no AWS deployment. Posts a summary comment on the PR automatically.
+
+---
+
+## Integration Tests
+
+39 test cases across 4 files, all hitting the live production API:
+
+```
+serverless/tests/
+└── integration/
+    ├── auth.test.js        (13 tests) — Register, login, JWT validation
+    ├── jobs-crud.test.js   (13 tests) — Full Create→Read→Update→Delete lifecycle
+    ├── jobs-search.test.js (15 tests) — Filters, search, sort modes, pagination
+    └── jobs-stats.test.js  (5 tests)  — Stats accuracy, monthly grouping, isolation
+```
+
+**Test isolation strategy:** Each test run registers a unique email using `Date.now()` as a suffix (`test-auth-<timestamp>@jobster.dev`). Multiple runs and parallel CI jobs never collide in DynamoDB.
+
+**Run locally:**
+```bash
+cd serverless
+export API_URL="https://6hqcka29e6.execute-api.ap-south-1.amazonaws.com/production/api/v1"
+npm test
+```
+
+---
+
+## Project Structure
+
+```
+Jobster-API/
+│
+├── .github/
+│   └── workflows/
+│       ├── deploy.yml          # CI/CD: validate → deploy → integration test
+│       ├── pr-check.yml        # PR gate: syntax + SAM lint, posts PR comment
+│       └── destroy.yml         # Manual: tear down the AWS stack
+│
+├── app.js                      # Express entry point
+├── routes/                     # Express route definitions
+├── controllers/                # Express route handlers (auth.js, jobs.js)
+├── models/                     # Mongoose schemas (User.js, Job.js)
+├── middleware/                 # Express middleware (authentication.js, error-handler.js)
+├── errors/                     # Custom error classes (BadRequestError, etc.)
+├── db/                         # MongoDB connection (connect.js)
+├── client/                     # React frontend (build output served by Express)
+├── package.json                # Express dependencies
+│
+└── serverless/                 # ── AWS Serverless Stack ──────────────────────
+    ├── template.yaml           # SAM IaC: ALL AWS resources defined here
+    ├── samconfig.toml          # SAM deploy defaults (region, stack name, params)
+    ├── package.json            # Lambda dependencies
+    ├── jest.config.js          # Jest config for integration tests
+    ├── .env.example            # Local development environment template
+    │
+    ├── src/
+    │   ├── handlers/           # Lambda function handlers (one file = one endpoint)
+    │   │   ├── auth-register.js
+    │   │   ├── auth-login.js
+    │   │   ├── auth-update-user.js
+    │   │   ├── jobs-create.js
+    │   │   ├── jobs-get-all.js
+    │   │   ├── jobs-get-one.js
+    │   │   ├── jobs-update.js
+    │   │   ├── jobs-delete.js
+    │   │   └── jobs-stats.js
+    │   │
+    │   └── lib/                # Shared utilities (imported by all handlers)
+    │       ├── auth-middleware.js  # JWT verify — called at top of each protected handler
+    │       ├── dynamo-client.js    # DynamoDB DocumentClient (X-Ray instrumented)
+    │       ├── errors.js           # Custom error classes (mirrors Express errors/)
+    │       ├── logger.js           # Structured JSON logger → CloudWatch Logs
+    │       ├── metrics.js          # EMF custom metrics → CloudWatch Metrics
+    │       ├── response.js         # Standardized API Gateway response builder
+    │       └── tracer.js           # X-Ray wrapper (no-op in local/test env)
+    │
+    ├── tests/
+    │   ├── helpers/
+    │   │   └── api-client.js   # Axios client factory (auth + unauth)
+    │   └── integration/
+    │       ├── auth.test.js
+    │       ├── jobs-crud.test.js
+    │       ├── jobs-search.test.js
+    │       └── jobs-stats.test.js
+    │
+    ├── events/                 # Sample JSON payloads for `sam local invoke`
+    └── scripts/                # Utility scripts (seed data, etc.)
+```
+
+---
+
+## Getting Started (Local Development)
+
+### Prerequisites
+
+| Tool | Version | Install |
+|---|---|---|
+| Node.js | ≥ 20 | [nodejs.org](https://nodejs.org) |
+| AWS CLI | v2 | [docs.aws.amazon.com/cli](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
+| AWS SAM CLI | latest | [docs.aws.amazon.com/serverless-application-model](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html) |
+| Docker | latest | Required for `sam local` only |
+| MongoDB | Atlas account | Only for the Express stack |
+| Git | any | — |
+
+---
+
+### Clone & Install
+
+```bash
+# Clone the repository
+git clone https://github.com/harjasae2001/Jobster-API.git
+cd Jobster-API
+```
+
+---
+
+### Run the Express App
+
+The original Express + MongoDB backend runs independently of AWS.
+
+**1. Install dependencies**
+```bash
+npm install
+```
+
+**2. Create a `.env` file in the project root**
+```env
+MONGO_URL=mongodb+srv://<user>:<password>@cluster.mongodb.net/jobster
+JWT_SECRET=your_jwt_secret_here_min_16_chars
+JWT_LIFETIME=1d
+PORT=5000
+```
+
+**3. Start the development server**
+```bash
+npm run dev
+# Server starts on http://localhost:5000
+# API available at http://localhost:5000/api/v1
+```
+
+**4. (Optional) Seed mock data**
+```bash
+node populate.js
+```
+
+---
+
+### Run the Serverless Stack Locally
+
+SAM CLI emulates Lambda and API Gateway locally using Docker.
+
+**1. Install serverless dependencies**
+```bash
+cd serverless
+npm install
+```
+
+**2. Configure environment**
+```bash
+cp .env.example .env
+# Edit .env and set JWT_SECRET (minimum 16 characters)
+```
+
+**3. Configure AWS credentials** (needed for DynamoDB — either real AWS or DynamoDB Local)
+```bash
+aws configure
+# AWS Access Key ID: <your key>
+# AWS Secret Access Key: <your secret>
+# Default region: ap-south-1
+# Output format: json
+```
+
+**4. Build the SAM application**
+```bash
+sam build
+```
+
+**5. Start the local API** (requires Docker running)
+```bash
+sam local start-api
+# API available at http://127.0.0.1:3000/api/v1
+```
+
+> **Note on DynamoDB:** By default, `sam local start-api` uses your real AWS DynamoDB table (`TABLE_NAME` from `.env`). To use a local DynamoDB container instead, run `docker run -p 8000:8000 amazon/dynamodb-local` and uncomment the `DYNAMODB_ENDPOINT` line in `.env`.
+
+**6. Test a single function directly (without full API Gateway)**
+```bash
+sam local invoke RegisterFunction -e events/auth-register.json
+sam local invoke LoginFunction -e events/auth-login.json
+```
+
+---
+
+## Deployment to AWS
+
+> **First-time setup:** Run `sam deploy --guided` once to populate `samconfig.toml` with your S3 bucket name. After that, all subsequent deploys use `sam deploy` without flags.
+
+### Prerequisites
+- AWS account with programmatic access
+- AWS CLI configured (`aws configure`)
+- SAM CLI installed
+
+### Deploy Steps
+
+```bash
+cd serverless
+
+# 1. Build (compiles all Lambda functions and resolves dependencies)
+sam build
+
+# 2. First-time deploy (interactive — sets your JWT_SECRET and creates S3 bucket)
+sam deploy --guided
+# Stack name: jobster-serverless
+# Region: ap-south-1
+# Parameter JwtSecret: <your secret, min 16 chars>
+# Parameter JwtLifetime: 1d
+# Parameter FrontendBucketSuffix: <any random 6-char string, e.g. a7f3k9>
+
+# 3. Subsequent deploys (uses samconfig.toml defaults)
+sam deploy
+```
+
+### After Deploy — Upload the React Frontend
+
+The SAM deploy creates the S3 bucket and CloudFront distribution, but doesn't upload frontend files. Build and sync the React app:
+
+```bash
+# In the project root
+cd client
+npm install
+npm run build
+
+# Sync to S3 (get bucket name from CloudFormation outputs)
+aws s3 sync dist/ s3://jobster-frontend-<your-suffix>/ --delete
+
+# Invalidate CloudFront cache
+aws cloudfront create-invalidation \
+  --distribution-id <your-distribution-id> \
+  --paths "/*"
+```
+
+Get the CloudFront distribution ID from:
+```bash
+aws cloudformation describe-stacks \
+  --stack-name jobster-serverless \
+  --region ap-south-1 \
+  --query "Stacks[0].Outputs"
+```
+
+### Tear Down
+
+To delete all AWS resources:
+```bash
+# Delete S3 objects first (CloudFormation can't delete non-empty buckets)
+aws s3 rm s3://jobster-frontend-<your-suffix>/ --recursive
+
+# Delete the CloudFormation stack (removes all Lambda, DDB, API GW, CloudFront resources)
+sam delete --stack-name jobster-serverless --region ap-south-1
+```
+
+---
+
+## Environment Variables
+
+### Express App (root `.env`)
+
+| Variable | Required | Example | Description |
+|---|---|---|---|
+| `MONGO_URL` | ✅ | `mongodb+srv://...` | MongoDB Atlas connection string |
+| `JWT_SECRET` | ✅ | `my_super_secret_key_here` | JWT signing secret (min 16 chars) |
+| `JWT_LIFETIME` | ❌ | `1d` | Token expiry (default: `1d`) |
+| `PORT` | ❌ | `5000` | Express listen port (default: `5000`) |
+
+### Serverless Stack (SAM Parameters / Lambda env vars)
+
+These are set as CloudFormation parameters during `sam deploy --guided` and injected into Lambda at runtime:
+
+| Variable | Source | Example | Description |
+|---|---|---|---|
+| `JWT_SECRET` | SAM parameter | `my_secret` | Stored as plain text in CloudFormation (consider SSM for production) |
+| `JWT_LIFETIME` | SAM parameter | `1d` | Token expiry passed to all auth handlers |
+| `TABLE_NAME` | Auto-injected by SAM | `JobsterTable-production` | DynamoDB table name — never set manually |
+| `ENVIRONMENT` | SAM parameter | `production` | Used as a dimension in EMF metrics |
+| `AWS_REGION` | Auto-set by Lambda | `ap-south-1` | Available in all Lambda environments automatically |
+
+---
+
+## Cost Estimate
+
+Estimated monthly cost at **~120 USD credit** with light usage (portfolio/demo traffic):
+
+| Service | Usage | Estimated Cost |
+|---|---|---|
+| **Lambda** | 1M requests/month, avg 100ms, 128MB | ~$0.40 |
+| **API Gateway** | 1M API calls/month | ~$3.50 |
+| **DynamoDB** | PAY_PER_REQUEST, ~1M reads, ~200K writes | ~$1.50 |
+| **S3** | Static hosting, ~1GB storage | ~$0.02 |
+| **CloudFront** | ~10GB data transfer/month | ~$0.85 |
+| **CloudWatch** | Logs ingestion, metrics, dashboard | ~$2.00 |
+| **X-Ray** | 100K traces/month (5% sampling) | ~$0.50 |
+| **SNS** | Alarm emails | < $0.01 |
+| **Total** | | **~$8.80/month** |
+
+> At $8.80/month, your $120 AWS credits cover approximately **13 months** of portfolio-level traffic. The AWS Free Tier (1M Lambda requests, 25GB DynamoDB, 1M API Gateway calls per month) covers the first 12 months regardless of credits for new accounts.
+]]>
