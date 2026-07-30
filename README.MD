@@ -632,6 +632,3 @@ Estimated monthly cost at portfolio/demo traffic levels:
 | SNS (alarm emails) | < $0.01 |
 | **Total** | **~$8.80 / month** |
 
-At $8.80/month, $120 in AWS credits covers approximately **13 months** of portfolio-level traffic.
-
-The AWS Free Tier also covers the first 12 months for new accounts: 1M Lambda requests, 25GB DynamoDB storage, and 1M API Gateway calls per month.
