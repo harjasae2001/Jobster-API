@@ -6,8 +6,8 @@ module.exports = {
   // 30 seconds per test — generous for Lambda cold starts on first invocation
   testTimeout: 30000,
 
-  // Only run integration tests (keeps unit tests separate if added later)
-  testMatch: ['**/tests/integration/**/*.test.js'],
+  testMatch: ['**/tests/**/*.test.js'],
+  modulePathIgnorePatterns: ['<rootDir>/.aws-sam/'],
 
   // Run test FILES sequentially (--maxWorkers=1) to avoid API rate limiting.
   // Individual tests within a file still run in order by default.

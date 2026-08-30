@@ -20,6 +20,9 @@ const { captureAWSv3Client } = require('./tracer');
 
 const rawClient = new DynamoDBClient({
   region: process.env.AWS_REGION || 'ap-south-1',
+  ...(process.env.DYNAMODB_ENDPOINT
+    ? { endpoint: process.env.DYNAMODB_ENDPOINT }
+    : {}),
   // AWS_NODEJS_CONNECTION_REUSE_ENABLED=1 is set as a Lambda env var in template.yaml.
   // It configures the underlying HTTP agent to use keep-alive (persistent TCP connections),
   // saving ~5-20ms per warm invocation by reusing existing connections to DynamoDB.

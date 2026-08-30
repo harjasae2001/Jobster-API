@@ -15,8 +15,10 @@
     "local:api": "sam local start-api",
     "seed": "node scripts/seed.js",
     "validate": "sam validate",
-    "test": "jest --forceExit",
+    "test": "npm run test:unit",
+    "test:unit": "jest --testPathPattern=unit --forceExit",
     "test:integration": "jest --testPathPattern=integration --forceExit",
+    "lint": "node scripts/check-syntax.js",
     "test:watch": "jest --watch"
   },
   "dependencies": {

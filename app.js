@@ -7,7 +7,10 @@ const helmet = require('helmet');
 const xss = require('xss-clean');
 
 const express = require('express');
+const swaggerUi = require('swagger-ui-express');
+const YAML = require('yamljs');
 const app = express();
+const openapiDocument = YAML.load(path.resolve(__dirname, './openapi.yaml'));
 
 const connectDB = require('./db/connect');
 const authenticateUser = require('./middleware/authentication');
@@ -25,6 +28,9 @@ app.use(express.json());
 app.use(helmet());
 
 app.use(xss());
+
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openapiDocument));
+app.get('/api-docs.json', (req, res) => res.json(openapiDocument));
 
 // routes
 app.use('/api/v1/auth', authRouter);

@@ -9,6 +9,8 @@ on:
       - main
     paths:
       - 'serverless/**'
+      - 'client/**'
+      - 'openapi.yaml'
       - '.github/workflows/**'
 
 env:
@@ -42,6 +44,10 @@ jobs:
         working-directory: serverless
         run: npm ci
 
+      - name: Run unit tests
+        working-directory: serverless
+        run: npm run test:unit
+
       - name: Syntax check — all handler and lib files
         working-directory: serverless
         run: |
@@ -63,6 +69,16 @@ jobs:
       - name: Validate SAM template
         working-directory: serverless
         run: sam validate --lint
+
+      - name: Install frontend dependencies
+        working-directory: client
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: client
+        env:
+          CI: true
+        run: npm run build
 
       - name: Post validation summary to PR
         if: always()
