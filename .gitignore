@@ -1,6 +1,15 @@
 /node_modules
-.env*
+.env
+.env.*
+.env.local
+.env.*.local
+env.local.json
+serverless/env.local.json
+!.env.example
+!serverless/.env.example
 /serverless/node_modules
 /serverless/.aws-sam
 /serverless/scripts
+!/serverless/scripts/
+!/serverless/scripts/check-syntax.js
 client/build

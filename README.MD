@@ -1,681 +1,196 @@
 # Jobster API
 
-#### Starter
+A full-stack job application tracker with two backends: the original Express/MongoDB application and an AWS serverless implementation using API Gateway, Lambda, DynamoDB, S3, and CloudFront.
 
-The starter is a copy of jobs-api final project, just with additional data.
+[![PR checks](https://github.com/harjasae2001/Jobster-API/actions/workflows/pr-check.yml/badge.svg)](https://github.com/harjasae2001/Jobster-API/actions/workflows/pr-check.yml)
+[![Deploy](https://github.com/harjasae2001/Jobster-API/actions/workflows/deploy.yml/badge.svg)](https://github.com/harjasae2001/Jobster-API/actions/workflows/deploy.yml)
 
-#### Setup
+- Live application: [Jobster on CloudFront](https://d2t3sgj258ubhc.cloudfront.net/landing)
+- Production API: `https://6hqcka29e6.execute-api.ap-south-1.amazonaws.com/production/api/v1`
+- API contract: [`openapi.yaml`](openapi.yaml)
 
-- navigate to 06.5-jobster-api/starter
-- install dependencies
+## Architecture
 
-```sh
-npm install
+The React client in `client/` can use either backend. `app.js` exposes an Express API backed by MongoDB through Mongoose. `serverless/template.yaml` deploys API Gateway routes to one Lambda per operation, backed by a DynamoDB single table, and hosts the React build in S3 behind CloudFront.
+
+Protected job queries always derive the owner identifier from the verified JWT. Clients cannot choose another user's `createdBy` value.
+
+## Key engineering decisions
+
+### Idempotent request handling
+
+The API does **not yet provide general idempotency keys**. `POST /jobs` generates a new MongoDB ObjectId or UUID on every successful call, so retrying the same request can create duplicates. Clients should not automatically retry writes until an `Idempotency-Key` store and conditional write path are added.
+
+Registration is concurrency-safe for duplicate email addresses in the serverless stack: a DynamoDB conditional put on `USER#<normalized-email>` permits only the first write. This is uniqueness enforcement, not replay of a previous response, so it is not full request idempotency.
+
+Updates and deletes are repeat-safe only in a limited sense: repeated identical updates converge, while the first delete succeeds and a repeat returns not found.
+
+### JWT authentication and role-based access
+
+Login and registration issue a signed JWT containing `userId` and `name`. Protected endpoints require `Authorization: Bearer <token>` and verify the signature and expiry using `JWT_SECRET`. Tokens default to a one-day lifetime.
+
+Authorization is ownership-based: MongoDB queries include `createdBy`, while DynamoDB job keys are partitioned by the authenticated user ID. The Express demo account is treated as a read-only `testUser` by middleware.
+
+There is **no general role-based access-control model**—no `admin`, `member`, permission table, or role claim. Add explicit roles and server-side permission checks before exposing administrative operations; hiding UI actions is not authorization.
+
+### Retry/backoff for external APIs
+
+The application does not call third-party business APIs. Serverless persistence uses AWS SDK v3, whose client applies its standard retry strategy to retryable AWS service failures. The code does not wrap requests in an additional retry loop.
+
+If an external API is introduced, use bounded exponential backoff with jitter for timeouts, `429`, and retryable `5xx` responses; honor `Retry-After`; set timeouts; and retry writes only when the provider supports an idempotency key. Authentication and validation failures must not be retried.
+
+### Caching and invalidation
+
+- Dynamic `/api/*` traffic is forwarded to API Gateway with caching disabled to avoid serving one user's data to another.
+- CloudFront caches the S3-hosted SPA with a one-day default TTL and compression. Deployments synchronize the new build and issue a CloudFront invalidation.
+- Lambda creates the DynamoDB client at module scope so warm invocations reuse connections. This is connection reuse, not a data cache.
+- There is no Redis or in-process response cache. MongoDB and DynamoDB remain the source of truth, so writes require no application-cache invalidation today.
+
+Any future user-data cache must include the authenticated user and all query parameters in its key, use a short TTL, and invalidate that user's list, item, and stats keys after create, update, or delete operations.
+
+## API
+
+| Method | Path | Auth | Purpose |
+|---|---|---:|---|
+| `POST` | `/auth/register` | No | Register and receive a JWT |
+| `POST` | `/auth/login` | No | Log in and receive a JWT |
+| `PATCH` | `/auth/updateUser` | Yes | Update the current profile |
+| `GET` | `/jobs` | Yes | Search, filter, sort, and paginate owned jobs |
+| `POST` | `/jobs` | Yes | Create a job |
+| `GET` | `/jobs/stats` | Yes | Get status and monthly totals |
+| `GET` | `/jobs/{id}` | Yes | Get an owned job |
+| `PATCH` | `/jobs/{id}` | Yes | Update an owned job |
+| `DELETE` | `/jobs/{id}` | Yes | Delete an owned job |
+
+The OpenAPI 3.0 contract is in [`openapi.yaml`](openapi.yaml). With Express running, Swagger UI is at [http://localhost:5000/api-docs](http://localhost:5000/api-docs), with JSON at `/api-docs.json`. `GET /jobs` accepts `search`, `status`, `jobType`, `sort`, `page`, and `limit`.
+
+## Run locally
+
+### Prerequisites
+
+- Node.js 20 or newer for the serverless project (deployed Lambda runtime: Node.js 24)
+- Docker with Docker Compose
+- AWS SAM CLI for local Lambda emulation
+- AWS CLI credentials only when using deployed AWS resources
+
+### Express + MongoDB (recommended)
+
+```bash
+docker compose up -d mongodb
+cp .env.example .env
+npm ci
+npm ci --prefix client
+npm run build --prefix client
+npm run dev
 ```
 
-- create .env and provide correct values
-- you can copy from previous project (just change the DB name)
+On PowerShell use `Copy-Item .env.example .env` instead of `cp`. The application is served at `http://localhost:5000`; the API base is `http://localhost:5000/api/v1`.
 
-.env
+| Variable | Required | Local value | Purpose |
+|---|---:|---|---|
+| `MONGO_URI` | Yes | `mongodb://localhost:27017/jobster` | MongoDB connection |
+| `JWT_SECRET` | Yes | long random value | JWT signing secret |
+| `JWT_LIFETIME` | Yes | `1d` | Token lifetime |
+| `PORT` | No | `5000` | HTTP port |
 
-```js
-MONGO_URI=
-JWT_SECRET=
-JWT_LIFETIME=
+Generate a development secret with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. `.env` is ignored; commit only `.env.example` with placeholders. Never place production credentials in source, examples, issues, logs, or workflow files.
+
+Create sample data through the API so every record belongs to a real user:
+
+```bash
+curl -X POST http://localhost:5000/api/v1/auth/register -H "Content-Type: application/json" -d '{"name":"Ada Lovelace","email":"ada@example.test","password":"local-password","lastName":"Lovelace","location":"London"}'
 ```
 
-- start the project
+Copy `user.token` from the response, then run:
 
-```sh
-npm start
+```bash
+curl -X POST http://localhost:5000/api/v1/jobs -H "Content-Type: application/json" -H "Authorization: Bearer YOUR_TOKEN" -d '{"company":"Analytical Engines Ltd","position":"Software Engineer","status":"pending","jobType":"remote","jobLocation":"Remote"}'
 ```
 
-- you should see "Server is listening ...." text
+`mock-data.json` is legacy seed data tied to a fixed demo user ID. Use `node populate.js` only when that user exists and `MONGO_URI` points to a disposable database.
 
-#### Spring Cleaning
+### Serverless API + DynamoDB Local
 
-##### Remove Swagger
-
-- delete swagger.yaml file
-- remove these lines of code
-- delete swagger.yaml
-  app.js
-
-```js
-const swaggerUI = require('swagger-ui-express');
-const YAML = require('yamljs');
-const swaggerDocument = YAML.load('./swagger.yaml');
-
-app.get('/', (req, res) => {
-  res.send('<h1>Jobs API</h1><a href="/api-docs">Documentation</a>');
-});
-app.use('/api-docs', swaggerUI.serve, swaggerUI.setup(swaggerDocument));
+```bash
+docker compose up -d dynamodb-local
+aws dynamodb create-table --table-name Jobster --attribute-definitions AttributeName=PK,AttributeType=S AttributeName=SK,AttributeType=S --key-schema AttributeName=PK,KeyType=HASH AttributeName=SK,KeyType=RANGE --billing-mode PAY_PER_REQUEST --endpoint-url http://localhost:8000 --region ap-south-1
+cd serverless
+npm ci
+cp .env.example .env
+sam build
+sam local start-api --env-vars env.local.json --docker-network jobster-api_default
 ```
 
-#### Remove API Limiter
+Create untracked `serverless/env.local.json` because SAM expects JSON rather than dotenv syntax:
 
-- remove these lines of code
-
-app.js
-
-```js
-const rateLimiter = require('express-rate-limit');
-
-app.set('trust proxy', 1);
-app.use(
-  rateLimiter({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // limit each IP to 100 requests per windowMs
-  })
-);
-```
-
-#### Remove CORS
-
-- we don't want external JS apps to access our API (only our front-end)
-- remove these lines of code
-
-```js
-const cors = require('cors');
-app.use(cors());
-```
-
-#### Package.json
-
-- add "dev" script with nodemon
-- change engines to current version (in my case 16)
-
-package.json
-
-```js
-
-"scripts": {
-    "start": "node app.js",
-    "dev": "nodemon app.js"
-  },
-
-"engines": {
-    "node": "16.x"
-  }
-```
-
-- restart server with "npm run dev"
-
-##### Client Folder
-
-- let's explore client folder
-- open client folder
-- it's a react app built with CRA
-- it's the same as in my React Course (JOBSTER APP),
-  just base url points to our current server (instead of heroku app)
-
-utils/axios.js
-
-```js
-const customFetch = axios.create({
-  baseURL: '/api/v1',
-});
-```
-
-- notice the build folder (production ready application)
-- in CRA we can create build folder by running "npm run build"
-- that's the one we will use for our front-end
-
-##### Setup Front-End
-
-- require "path" module
-- setup express static (as first middleware)
-  to serve static assets from client/build
-- so now instead of public folder we are using client/build
-
-app.js
-
-```js
-const path = require('path');
-
-app.use(express.static(path.resolve(__dirname, './client/build')));
-
-// place as first middleware
-app.use(express.json());
-app.use(helmet());
-app.use(cors());
-app.use(xss());
-```
-
-- serve index.html for all routes (apart from API)
-- front-end routes pick's it up from there
-
-```js
-app.use('/api/v1/auth', authRouter);
-app.use('/api/v1/jobs', authenticateUser, jobsRouter);
-
-// serve index.html
-app.get('*', (req, res) => {
-  res.sendFile(path.resolve(__dirname, './client/build', 'index.html'));
-});
-
-app.use(notFoundMiddleware);
-app.use(errorHandlerMiddleware);
-```
-
-- navigate to localhost:5000
-- clear local storage (if necessary)
-
-#### Modify User Model
-
-- add following properties
-
-models/User.js
-
-```js
-lastName: {
-    type: String,
-    trim: true,
-    maxlength: 20,
-    default: 'lastName',
-  },
-  location: {
-    type: String,
-    trim: true,
-    maxlength: 20,
-    default: 'my city',
-  },
-
-```
-
-#### Modify Response in Register and Login
-
-- change the response structure in
-  register and login controllers (just keep old StatusCodes)
-
-controllers/auth.js
-
-```js
-res.status(StatusCodes.CREATED).json({
-  user: {
-    email: user.email,
-    lastName: user.lastName,
-    location: user.location,
-    name: user.name,
-    token,
-  },
-});
-```
-
-- Login and Register Works Now :):):)
-
-#### Create Test User
-
-- test front-end request
-- in postman or front-end
-- make sure email and password are the same (or change the front-end)
-
-```js
+```json
 {
-    "name":"demo user",
-    "email":"testUser@test.com",
-    "password":"secret"
+  "Parameters": {
+    "JWT_SECRET": "replace-with-a-long-random-secret",
+    "JWT_LIFETIME": "1d",
+    "TABLE_NAME": "Jobster",
+    "DYNAMODB_ENDPOINT": "http://dynamodb-local:8000",
+    "AWS_REGION": "ap-south-1"
+  }
 }
 ```
 
-- navigate to client/src/pages/Register.js
-- make sure email and password match your test user
+The SAM API is at `http://127.0.0.1:3000/api/v1`. The Compose network is normally `<repository-directory>_default`; check `docker network ls` and substitute the actual name when needed. Dummy AWS credentials are sufficient for DynamoDB Local.
 
-```js
-<button
-  type='button'
-  className='btn btn-block btn-hipster'
-  disabled={isLoading}
-  onClick={() =>
-  dispatch(loginUser({ email: 'testUser@test.com', password: 'secret' }))}>
+## Quality
 
+### Tests and linting
+
+```bash
+cd serverless
+npm ci
+npm run lint
+npm run test:unit
+API_URL=http://127.0.0.1:3000/api/v1 npm run test:integration
 ```
 
-#### Update User Functionality
+- Unit tests cover JWT middleware and run without infrastructure.
+- Integration suites cover authentication, CRUD, search/filter/pagination, statistics, and user isolation against `API_URL`. They create data, so use local or staging—not production.
+- `npm run lint --prefix serverless` performs deterministic Node syntax checks; `sam validate --lint` lints the infrastructure template.
+- The React production build runs Create React App's ESLint checks and fails CI on warnings with `CI=true`.
 
-- import authenticateUser middleware
-- setup updateUser route (protected route)
+### API docs, CI, and builds
 
-routes/auth.js
+- Swagger/OpenAPI: [`openapi.yaml`](openapi.yaml) and `/api-docs` on Express.
+- `.github/workflows/pr-check.yml` installs locked dependencies, runs unit tests, syntax checks, SAM linting, and the React build on pull requests.
+- `.github/workflows/deploy.yml` validates, builds, deploys changes from `main`, then runs integration tests against the deployed endpoint.
+- The badges at the top show current GitHub workflow status. Run the local checks before opening a pull request.
 
-```js
-const express = require('express');
-const router = express.Router();
-const authenticateUser = require('../middleware/authentication');
-const { register, login, updateUser } = require('../controllers/auth');
-router.post('/register', register);
-router.post('/login', login);
-router.patch('/updateUser', authenticateUser, updateUser);
+## Deployment
 
-module.exports = router;
+```bash
+cd serverless
+npm ci
+sam validate --lint
+sam build
+sam deploy --guided
 ```
 
-- create updateUser controller
-- setup export
+The guided deployment asks for stack name, region, environment, JWT secret, JWT lifetime, and frontend bucket suffix. Subsequent releases can use `sam deploy`. GitHub Actions currently expects `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `JWT_SECRET` repository secrets; prefer GitHub OIDC for a production repository.
 
-controllers/auth.js
+Deployment: [https://d2t3sgj258ubhc.cloudfront.net/landing](https://d2t3sgj258ubhc.cloudfront.net/landing).
 
-```js
-const updateUser = async (req, res) => {
-  console.log(req.user);
-  console.log(req.body);
-};
+## Repository layout
+
+```text
+controllers/, routes/, models/, middleware/  Express/MongoDB API
+client/                                      React client
+serverless/src/handlers/                     Lambda handlers
+serverless/src/lib/                          Shared serverless utilities
+serverless/tests/unit/                       Isolated unit tests
+serverless/tests/integration/                End-to-end API tests
+serverless/template.yaml                     AWS SAM infrastructure
+openapi.yaml                                 OpenAPI 3.0 contract
+.github/workflows/                           CI/CD workflows
 ```
 
-- complete updateUser
+## Contributing, issues, and license
 
-controllers/auth.js
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before submitting a change. Bug and feature forms are in `.github/ISSUE_TEMPLATE/`; sanitize logs and requests before posting them.
 
-```js
-const updateUser = async (req, res) => {
-  const { email, name, lastName, location } = req.body;
-  if (!email || !name || !lastName || !location) {
-    throw new BadRequestError('Please provide all values');
-  }
-  const user = await User.findOne({ _id: req.user.userId });
-
-  user.email = email;
-  user.name = name;
-  user.lastName = lastName;
-  user.location = location;
-
-  await user.save();
-
-  const token = user.createJWT();
-
-  res.status(StatusCodes.OK).json({
-    user: {
-      email: user.email,
-      lastName: user.lastName,
-      location: user.location,
-      name: user.name,
-      token,
-    },
-  });
-};
-```
-
-- Why New Token?
-
-#### GOTCHA
-
-- this.modifiedPaths();
-
-```js
-UserSchema.pre('save', async function () {
-  if (!this.isModified('password')) return;
-  const salt = await bcrypt.genSalt(10);
-  this.password = await bcrypt.hash(this.password, salt);
-});
-```
-
-#### Modify Job Model
-
-- add following properties
-
-models/Job.js
-
-```js
-jobType: {
-      type: String,
-      enum: ['full-time', 'part-time', 'remote', 'internship'],
-      default: 'full-time',
-    },
-    jobLocation: {
-      type: String,
-      default: 'my city',
-      required: true,
-    },
-```
-
-- default property just for fun, values will be provided by front-end
-
-#### Setup Mock Data
-
-- [Mockaroo](https://www.mockaroo.com/)
-- create mock-data.json (root)
-- provide test user id
-
-#### Populate DB
-
-- create populate.js
-
-populate.js
-
-```js
-require('dotenv').config();
-
-const mockData = require('./mock-data.json');
-
-const Job = require('./models/Job');
-const connectDB = require('./db/connect');
-
-const start = async () => {
-  try {
-    await connectDB(process.env.MONGO_URI);
-
-    await Job.create(mockData);
-    console.log('Success!!!');
-    process.exit(0);
-  } catch (error) {
-    console.log(error);
-    process.exit(1);
-  }
-};
-
-start();
-```
-
-#### Modify Get All Jobs
-
-- latest mongoose version change
-
-controllers/jobs.js
-
-```js
-const getAllJobs = async (req, res) => {
-  const { search, status, jobType, sort } = req.query;
-
-  // protected route
-  const queryObject = {
-    createdBy: req.user.userId,
-  };
-
-  if (search) {
-    queryObject.position = { $regex: search, $options: 'i' };
-  }
-  // add stuff based on condition
-
-  if (status && status !== 'all') {
-    queryObject.status = status;
-  }
-  if (jobType && jobType !== 'all') {
-    queryObject.jobType = jobType;
-  }
-
-  // NO AWAIT
-
-  let result = Job.find(queryObject);
-
-  // chain sort conditions
-
-  if (sort === 'latest') {
-    result = result.sort('-createdAt');
-  }
-  if (sort === 'oldest') {
-    result = result.sort('createdAt');
-  }
-  if (sort === 'a-z') {
-    result = result.sort('position');
-  }
-  if (sort === 'z-a') {
-    result = result.sort('-position');
-  }
-
-  //
-
-  // setup pagination
-  const page = Number(req.query.page) || 1;
-  const limit = Number(req.query.limit) || 10;
-  const skip = (page - 1) * limit;
-
-  result = result.skip(skip).limit(limit);
-
-  const jobs = await result;
-
-  const totalJobs = await Job.countDocuments(queryObject);
-  const numOfPages = Math.ceil(totalJobs / limit);
-
-  res.status(StatusCodes.OK).json({ jobs, totalJobs, numOfPages });
-};
-```
-
-#### Make Test User Read-Only
-
-middleware/authentication.js
-
-```js
-const payload = jwt.verify(token, process.env.JWT_SECRET);
-const testUser = payload.userId === '62eff8bcdb9af70b4155349d';
-req.user = { userId: payload.userId, testUser };
-```
-
-- create testingUser in middleware
-
-middleware/testUser
-
-```js
-const { BadRequestError } = require('../errors');
-
-const testUser = (req, res, next) => {
-  if (req.user.testUser) {
-    throw new BadRequestError('Test User. Read Only!');
-  }
-  next();
-};
-
-module.exports = testUser;
-```
-
-- add to auth routes (updateUser)
-
-```js
-const express = require('express');
-const router = express.Router();
-const authenticateUser = require('../middleware/authentication');
-const testUser = require('../middleware/testUser');
-const { register, login, updateUser } = require('../controllers/auth');
-
-router.post('/register', register);
-router.post('/login', login);
-router.patch('/updateUser', authenticateUser, testUser, updateUser);
-
-module.exports = router;
-```
-
-- add to job routes (createJob, updateJob, deleteJob)
-
-routes/jobs.js
-
-```js
-const express = require('express');
-
-const router = express.Router();
-const {
-  createJob,
-  deleteJob,
-  getAllJobs,
-  updateJob,
-  getJob,
-  showStats,
-} = require('../controllers/jobs');
-const testUser = require('../middleware/testUser');
-
-router.route('/').post(testUser, createJob).get(getAllJobs);
-router.route('/stats').get(showStats);
-router
-  .route('/:id')
-  .get(getJob)
-  .delete(testUser, deleteJob)
-  .patch(testUser, updateJob);
-
-module.exports = router;
-```
-
-#### API Limiter
-
-routes/auth.js
-
-```js
-const express = require('express');
-const router = express.Router();
-const authenticateUser = require('../middleware/authentication');
-const testUser = require('../middleware/testUser');
-const { register, login, updateUser } = require('../controllers/auth');
-
-const rateLimiter = require('express-rate-limit');
-const apiLimiter = rateLimiter({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10,
-  message: {
-    msg: 'Too many requests from this IP, please try again after 15 minutes',
-  },
-});
-
-router.post('/register', apiLimiter, register);
-router.post('/login', apiLimiter, login);
-router.patch('/updateUser', authenticateUser, testUser, updateUser);
-
-module.exports = router;
-```
-
-app.js
-
-```js
-app.set('trust proxy', 1);
-
-app.use(express.static(path.resolve(__dirname, './client/build')));
-```
-
-#### Setup Stats Route
-
-controllers/jobs
-
-```js
-const showStats = (req, res) => {
-  res
-    .status(StatusCodes.OK)
-    .json({ defaultStats: {}, monthlyApplications: [] });
-};
-
-module.exports = {
-  createJob,
-  deleteJob,
-  getAllJobs,
-  updateJob,
-  getJob,
-  showStats,
-};
-```
-
-routes/jobs.js
-
-```js
-const express = require('express');
-
-const router = express.Router();
-const {
-  createJob,
-  deleteJob,
-  getAllJobs,
-  updateJob,
-  getJob,
-  showStats,
-} = require('../controllers/jobs');
-
-router.route('/').post(createJob).get(getAllJobs);
-router.route('/stats').get(showStats);
-router.route('/:id').get(getJob).delete(deleteJob).patch(updateJob);
-
-module.exports = router;
-```
-
-- npm install moment
-- import mongoose and moment
-
-controllers/jobs
-
-```js
-const mongoose = require('mongoose');
-const moment = require('moment');
-```
-
-- [Javascript Nuggets - Reduce Basics](https://youtu.be/3WkW9nrS2mw)
-- [Javascript Nuggets - Reduce (object example)](https://youtu.be/5BFkp8JjLEY)
-
-controllers/jobs
-
-```js
-const showStats = async (req, res) => {
-  let stats = await Job.aggregate([
-    { $match: { createdBy: mongoose.Types.ObjectId(req.user.userId) } },
-    { $group: { _id: '$status', count: { $sum: 1 } } },
-  ]);
-
-  stats = stats.reduce((acc, curr) => {
-    const { _id: title, count } = curr;
-    acc[title] = count;
-    return acc;
-  }, {});
-
-  const defaultStats = {
-    pending: stats.pending || 0,
-    interview: stats.interview || 0,
-    declined: stats.declined || 0,
-  };
-
-  let monthlyApplications = await Job.aggregate([
-    { $match: { createdBy: mongoose.Types.ObjectId(req.user.userId) } },
-    {
-      $group: {
-        _id: { year: { $year: '$createdAt' }, month: { $month: '$createdAt' } },
-        count: { $sum: 1 },
-      },
-    },
-    { $sort: { '_id.year': -1, '_id.month': -1 } },
-    { $limit: 6 },
-  ]);
-  monthlyApplications = monthlyApplications
-    .map((item) => {
-      const {
-        _id: { year, month },
-        count,
-      } = item;
-      const date = moment()
-        .month(month - 1)
-        .year(year)
-        .format('MMM Y');
-      return { date, count };
-    })
-    .reverse();
-
-  res.status(StatusCodes.OK).json({ defaultStats, monthlyApplications });
-};
-```
-
-#### Deploy
-
-- remove existing git repo
-
-- add reverse() in showStats
-
-controllers/jobs.js
-
-```js
-monthlyApplications = monthlyApplications
-  .map((item) => {
-    const {
-      _id: { year, month },
-      count,
-    } = item;
-    const date = moment()
-      .month(month - 1)
-      .year(year)
-      .format('MMM Y');
-    return { date, count };
-  })
-  .reverse();
-```
-
-- remove Procfile
-- remove engines from package.json
-
-```json
-"engines": {
-    "node": "16.x"
-  }
-```
-
-- fix build folder (remove /build from client/.gitignore)
-- setup new github repo
-- deploy to render
+Licensed under the [ISC License](LICENSE).
