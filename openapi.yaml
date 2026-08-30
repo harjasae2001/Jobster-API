@@ -1,0 +1,177 @@
+openapi: 3.0.3
+info:
+  title: Jobster API
+  version: 1.0.0
+  description: REST API for user accounts and per-user job application tracking.
+servers:
+  - url: http://localhost:5000/api/v1
+    description: Local Express server
+  - url: https://6hqcka29e6.execute-api.ap-south-1.amazonaws.com/production/api/v1
+    description: Production AWS API Gateway
+tags:
+  - name: Auth
+  - name: Jobs
+paths:
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '201': { description: User created }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { description: Email already exists }
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in and receive a JWT
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+      responses:
+        '200': { description: Authenticated }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/updateUser:
+    patch:
+      tags: [Auth]
+      summary: Update the authenticated user's profile
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserProfile' }
+      responses:
+        '200': { description: Profile updated and token refreshed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /jobs:
+    get:
+      tags: [Jobs]
+      summary: List the authenticated user's jobs
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: search, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [all, pending, interview, declined], default: all } }
+        - { name: jobType, in: query, schema: { type: string, enum: [all, full-time, part-time, remote, internship], default: all } }
+        - { name: sort, in: query, schema: { type: string, enum: [latest, oldest, a-z, z-a], default: latest } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 10 } }
+      responses:
+        '200': { description: Paginated jobs }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Jobs]
+      summary: Create a job
+      description: Not currently idempotent; a repeated request creates another job.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JobInput' }
+      responses:
+        '201': { description: Job created }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /jobs/stats:
+    get:
+      tags: [Jobs]
+      summary: Get status totals and monthly application counts
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Aggregated job statistics }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /jobs/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Jobs]
+      summary: Get one owned job
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Job found }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Job not found }
+    patch:
+      tags: [Jobs]
+      summary: Update one owned job
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JobInput' }
+      responses:
+        '200': { description: Job updated }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Job not found }
+    delete:
+      tags: [Jobs]
+      summary: Delete one owned job
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Job deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Job not found }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing, invalid, or expired token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Error:
+      type: object
+      properties:
+        msg: { type: string }
+    UserProfile:
+      type: object
+      required: [name, email, lastName, location]
+      properties:
+        name: { type: string, minLength: 3, maxLength: 50 }
+        email: { type: string, format: email }
+        lastName: { type: string, maxLength: 20 }
+        location: { type: string, maxLength: 20 }
+    RegisterRequest:
+      allOf:
+        - $ref: '#/components/schemas/UserProfile'
+        - type: object
+          required: [password]
+          properties:
+            password: { type: string, format: password, minLength: 6 }
+    JobInput:
+      type: object
+      required: [company, position]
+      properties:
+        company: { type: string, maxLength: 50 }
+        position: { type: string, maxLength: 100 }
+        status: { type: string, enum: [pending, interview, declined], default: pending }
+        jobType: { type: string, enum: [full-time, part-time, remote, internship], default: full-time }
+        jobLocation: { type: string, default: my city }
